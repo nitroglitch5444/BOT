@@ -3977,14 +3977,42 @@ async function fetchVideoLinksAndTitle(videoId) {
         const snippet = res.data.items[0].snippet;
         const title = snippet.title;
         const description = snippet.description;
+        const channelId = snippet.channelId;
 
-        const descLinks = extractBypassLinks(description);
+        // Fetch comments to extract links from owner's comment
+        let commentText = "";
+        try {
+            const commentsRes = await axios.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
+                params: {
+                    part: 'snippet',
+                    videoId: videoId,
+                    order: 'relevance',
+                    key: YOUTUBE_API_KEY
+                }
+            });
+            
+            if (commentsRes.data && commentsRes.data.items) {
+                const ownerComments = commentsRes.data.items.filter(item => 
+                    item.snippet.topLevelComment.snippet.authorChannelId && 
+                    item.snippet.topLevelComment.snippet.authorChannelId.value === channelId
+                );
+                
+                ownerComments.forEach(item => {
+                    commentText += "\n" + item.snippet.topLevelComment.snippet.textOriginal;
+                });
+            }
+        } catch (err) {
+            console.error(`Error fetching comments for ${videoId}:`, err.response?.data || err.message);
+        }
+
+        const combinedText = description + "\n" + commentText;
+        const descLinks = extractBypassLinks(combinedText);
         const allLinks = [...new Set(descLinks)];
 
-        const robloxIdMatch = description.match(/roblox\.com\/games\/(\d+)/i);
+        const robloxIdMatch = combinedText.match(/roblox\.com\/games\/(\d+)/i);
         const robloxId = robloxIdMatch ? robloxIdMatch[1] : null;
 
-        return { title, links: allLinks, videoUrl: `https://www.youtube.com/watch?v=${videoId}`, robloxId, description };
+        return { title, links: allLinks, videoUrl: `https://www.youtube.com/watch?v=${videoId}`, robloxId, description: combinedText };
     } catch (e) {
         console.error(`fetchVideoLinksAndTitle API error for ${videoId}:`, e.response?.data || e.message);
         return { title: '', links: [], videoUrl: `https://www.youtube.com/watch?v=${videoId}` };
