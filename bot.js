@@ -8,7 +8,7 @@ const IZEN_API_KEY = process.env.IZEN_API_KEY;
 const IZEN_API_URL = "https://api.izen.lol/v1/bypass";
 let bypassInProgress = false;
 let bypassStopRequested = false;
-let REPO_GITHUB_TOKEN = null; // <-- Yahan daalo
+const REPO_GITHUB_TOKEN = null; // <-- Yahan daalo
 
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const { MongoClient } = require("mongodb");
@@ -144,8 +144,9 @@ const OWNER_ID = "1319539205885526018";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = "wendigothe48-maker";
 const REPO_OWNER = process.env.REPO_OWNER || "nitroglitch5444"; // ?repo wala
-const GITHUB_REPO = "promoteds";
-const GITHUB_BACKUP_REPO = "backup";
+const GITHUB_REPO = process.env.GITHUB_REPO || "promoteds";
+const GITHUB_BACKUP_REPO = process.env.GITHUB_BACKUP_REPO || "backup";
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const GITHUB_DIRECTX_REPO = "directx";
 const GITHUB_BACKOPS_REPO = "backops";
 const GITHUB_BRANCH = "main";
@@ -3792,52 +3793,103 @@ function titleToScriptName(title) {
     return name || null;
 }
 
-// ---- Helper: fetch YouTube channel's latest 30 video IDs via RSS (no API key needed) ----
+// ---- Helper: fetch YouTube channel's latest videos via API (preferred) or RSS ----
 async function fetchYouTubeVideoIds(channelInput) {
-    // channelInput is whatever comes after youtube.com/ — handle, channel ID, etc.
-    // Try RSS feed by channel ID first, then handle
-    const rssUrls = [];
+    if (YOUTUBE_API_KEY) {
+        try {
+            let channelId = channelInput;
+            
+            // If it's a handle (@name), we need to find the channel ID first
+            if (!channelId.startsWith('UC')) {
+                const searchUrl = `https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=${channelId.startsWith('@') ? channelId : '@' + channelId}&key=${YOUTUBE_API_KEY}`;
+                const res = await axios.get(searchUrl);
+                if (res.data.items && res.data.items[0]) {
+                    channelId = res.data.items[0].id;
+                } else {
+                    // Fallback to search if forHandle fails
+                    const q = channelId.startsWith('@') ? channelId : '@' + channelId;
+                    const searchFallback = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(q)}&key=${YOUTUBE_API_KEY}`;
+                    const resFb = await axios.get(searchFallback);
+                    if (resFb.data.items && resFb.data.items[0]) {
+                        channelId = resFb.data.items[0].id.channelId || resFb.data.items[0].snippet.channelId;
+                    }
+                }
+            }
 
-    if (channelInput.startsWith('UC')) {
-        rssUrls.push(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelInput}`);
+            if (channelId && channelId.startsWith('UC')) {
+                // The "uploads" playlist ID is usually the channel ID with UC -> UU
+                const uploadsPlaylistId = 'UU' + channelId.substring(2);
+                const playlistUrl = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=30&key=${YOUTUBE_API_KEY}`;
+                const res = await axios.get(playlistUrl);
+                
+                if (res.data.items) {
+                    return res.data.items.map(item => ({
+                        id: item.snippet.resourceId.videoId,
+                        title: item.snippet.title,
+                        description: item.snippet.description
+                    }));
+                }
+            }
+        } catch (e) {
+            console.error(`YouTube API fetch failed for ${channelInput}:`, e.response?.data || e.message);
+            // Fallthrough to RSS fallback
+        }
     }
-    // Also try as handle via scraping the channel page for the real channel ID
-    rssUrls.push(`https://www.youtube.com/@${channelInput}/videos`);
-    rssUrls.push(`https://www.youtube.com/c/${channelInput}/videos`);
-    rssUrls.push(`https://www.youtube.com/user/${channelInput}/videos`);
 
-    // First try RSS directly (works for channel IDs)
+    // --- RSS FALLBACK (Legacy/No API Key) ---
+    // channelInput is whatever comes after youtube.com/ — handle, channel ID, etc.
+
+    // If it's already a channel ID
     if (channelInput.startsWith('UC')) {
         try {
-            const rss = await axios.get(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelInput}`, { timeout: 15000 });
+            const rss = await axios.get(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelInput}`, { 
+                timeout: 10000,
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' }
+            });
             const ids = [];
             const titles = [];
             const regex = /<yt:videoId>([^<]+)<\/yt:videoId>/g;
             const titleRegex = /<title>([^<]+)<\/title>/g;
             let m, t;
-            // skip first title (channel name)
-            titleRegex.exec(rss.data);
+            titleRegex.exec(rss.data); // skip channel name
             while ((m = regex.exec(rss.data)) && ids.length < 30) ids.push(m[1]);
             while ((t = titleRegex.exec(rss.data)) && titles.length < 30) titles.push(t[1]);
             if (ids.length > 0) return ids.map((id, i) => ({ id, title: titles[i] || '' }));
-        } catch (e) { /* fall through */ }
+        } catch (e) { console.error(`RSS direct fail for ${channelInput}:`, e.message); }
     }
 
-    // Scrape channel page for UC channel id then RSS
+    // Otherwise, scrape the channel page to find the UC channel ID
     try {
-        const pageUrl = channelInput.startsWith('UC')
-            ? `https://www.youtube.com/channel/${channelInput}`
-            : channelInput.startsWith('@')
-                ? `https://www.youtube.com/@${channelInput.replace(/^@/, '')}`
-                : `https://www.youtube.com/@${channelInput}`;
+        const handle = channelInput.startsWith('@') ? channelInput : `@${channelInput}`;
+        const pageUrl = `https://www.youtube.com/${handle}/videos`;
 
         const page = await axios.get(pageUrl, {
             timeout: 15000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' }
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9'
+            }
         });
+
+        // 1. Try finding channelId in JSON/Config
+        let cid = null;
         const cidMatch = page.data.match(/"channelId"\s*:\s*"(UC[^"]+)"/);
-        if (cidMatch) {
-            const rss = await axios.get(`https://www.youtube.com/feeds/videos.xml?channel_id=${cidMatch[1]}`, { timeout: 15000 });
+        if (cidMatch) cid = cidMatch[1];
+        
+        // 2. Try finding RSS feed link
+        if (!cid) {
+            const rssMatch = page.data.match(/youtube\.com\/feeds\/videos\.xml\?channel_id=(UC[^"&]+)/);
+            if (rssMatch) cid = rssMatch[1];
+        }
+
+        // 3. Try finding browseId (which is the channel ID)
+        if (!cid) {
+            const browseMatch = page.data.match(/"browseId"\s*:\s*"(UC[^"]+)"/);
+            if (browseMatch) cid = browseMatch[1];
+        }
+
+        if (cid) {
+            const rss = await axios.get(`https://www.youtube.com/feeds/videos.xml?channel_id=${cid}`, { timeout: 10000 });
             const ids = [];
             const titles = [];
             const regex = /<yt:videoId>([^<]+)<\/yt:videoId>/g;
@@ -3846,9 +3898,11 @@ async function fetchYouTubeVideoIds(channelInput) {
             titleRegex.exec(rss.data); // skip channel title
             while ((m = regex.exec(rss.data)) && ids.length < 30) ids.push(m[1]);
             while ((t = titleRegex.exec(rss.data)) && titles.length < 30) titles.push(t[1]);
-            if (ids.length > 0) return ids.map((id, i) => ({ id, title: titles[i] || '', channelId: cidMatch[1] }));
+            if (ids.length > 0) return ids.map((id, i) => ({ id, title: titles[i] || '', channelId: cid }));
         }
-    } catch (e) { /* fall through */ }
+    } catch (e) { 
+        console.error(`Scraping fail for ${channelInput}:`, e.message);
+    }
 
     return [];
 }
@@ -3860,8 +3914,24 @@ function extractBypassLinks(text) {
     return found.filter(url => needsBypass(url));
 }
 
-// ---- Helper: fetch YouTube video description and top comments via scraping ----
+// ---- Helper: fetch YouTube video description and top comments via API or scraping ----
 async function fetchVideoLinksAndTitle(videoId) {
+    if (YOUTUBE_API_KEY) {
+        try {
+            const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${YOUTUBE_API_KEY}`;
+            const res = await axios.get(url);
+            if (res.data.items && res.data.items[0]) {
+                const item = res.data.items[0];
+                const title = item.snippet.title;
+                const desc = item.snippet.description;
+                const links = extractBypassLinks(desc);
+                return { title, links, videoUrl: `https://www.youtube.com/watch?v=${videoId}` };
+            }
+        } catch (e) {
+            console.error(`YouTube API video details failed for ${videoId}:`, e.message);
+        }
+    }
+
     try {
         const url = `https://www.youtube.com/watch?v=${videoId}`;
         const res = await axios.get(url, {
