@@ -2345,7 +2345,8 @@ if (cmd === "?modhelp" || cmd === "?mp") {
                     "`?yt set <channel_url>` - Add a YT channel, scan 30 latest videos, bypass & upload scripts\n" +
                     "`?yt remove <channel_url>` - Remove a YT channel and all its scripts\n" +
                     "`?yt <name or number>` - Get loadstring for a script (e.g. `?yt FatToFit` or `?yt 3`)\n" +
-                    "`?ytl` / `?youtubelist` / `?ytlist` - List all YouTube-sourced scripts\n\n" +
+                    "`?ytl` / `?youtubelist` / `?ytlist` - List all YouTube-sourced scripts\n" +
+                    "`?ytsl` - List all YouTube channels currently being tracked\n\n" +
                     "**Aliases:** `?youtube` works everywhere `?yt` does",
                 inline: false
             },
@@ -4049,12 +4050,34 @@ client.on("messageCreate", async (ytMsg) => {
 
     const isYtCmd = rawCmd === '?yt' || rawCmd === '?youtube';
     const isYtListCmd = ['?ytl', '?youtubel', '?youtubelist', '?ytlist'].includes(rawCmd);
+    const isYtScanListCmd = rawCmd === '?ytsl';
 
-    if (!isYtCmd && !isYtListCmd) return;
+    if (!isYtCmd && !isYtListCmd && !isYtScanListCmd) return;
 
     // Staff check for all yt commands
     if (!(await isStaff(ytMsg.author.id, ytMsg.member)) && ytMsg.author.id !== OWNER_ID) {
         return ytMsg.reply('❌ Staff only command.');
+    }
+
+    // ===== ?ytsl =====
+    if (isYtScanListCmd) {
+        const configs = await ytCollection.find({ type: 'config' }).sort({ updatedAt: -1 }).toArray();
+        if (!configs.length) return ytMsg.reply('📭 No YouTube channels currently tracked for auto-scanning.');
+
+        let list = '**📋 Tracked YouTube Channels:**\n\n';
+        configs.forEach((c, i) => {
+            list += `**${i + 1}.** \`${c.channelHandle || c.channelUrl}\` (Latest: \`${c.lastProcessedVideoId || 'None'}\`)\n`;
+        });
+        list += `\n💡 Use \`?yt set <url>\` to scan or update a channel.`;
+
+        const embed = new EmbedBuilder()
+            .setTitle('📺 YouTube Scan List')
+            .setDescription(list)
+            .setColor('Red')
+            .setFooter({ text: `Total: ${configs.length} channels` })
+            .setTimestamp();
+
+        return ytMsg.reply({ embeds: [embed] });
     }
 
     // ===== ?ytl / ?youtubelist =====
