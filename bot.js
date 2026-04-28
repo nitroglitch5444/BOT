@@ -137,6 +137,7 @@ let dailyStatsCollection;
 let userStatsCollection;
 let ytCollection;
 let ytTrackedCollection;
+let ytProcessedCollection;
 
 const COOLDOWN_TIME = 10 * 60 * 1000;
 const STAFF_ROLE_ID = "1449394350009356481";
@@ -1069,6 +1070,7 @@ shortcutCollection = db.collection("shortcuts");
     userStatsCollection = defaultDb.collection("userstats");
     ytCollection = defaultDb.collection("ytchannels");
     ytTrackedCollection = defaultDb.collection("yttracked");
+    ytProcessedCollection = defaultDb.collection("ytprocessed");
 
     console.log("Connected to MongoDB!");
 }
@@ -1654,8 +1656,48 @@ client.once("ready", async () => {
             } else {
                 await giveawayCollection.deleteOne({ messageId: giveaway.messageId });
             }
+    // Background YouTube Scraper Loop (Optimized with MongoDB)
+    setInterval(async () => {
+        try {
+            console.log("[YT-AutoCheck] Starting background check for tracked channels...");
+            const trackedChannels = await ytTrackedCollection.find({}).toArray();
+            if (!trackedChannels.length) return;
+
+            for (const tracked of trackedChannels) {
+                const channelHandle = tracked.channelHandle;
+                const qty = tracked.qty || 30;
+                const targetChannelId = '1460943448017207479';
+                const targetCh = client.channels.cache.get(targetChannelId);
+
+                if (!targetCh) continue;
+
+                const videos = await fetchYouTubeVideoIds(channelHandle);
+                if (!videos.length) continue;
+
+                // Only check the top 'qty' videos
+                const videosToProcess = videos.slice(0, qty); 
+                for (const video of videosToProcess) {
+                    const alreadySeen = await ytProcessedCollection.findOne({ videoId: video.id });
+                    if (alreadySeen) continue; 
+                    
+                    console.log(`[YT-AutoCheck] New video found for ${channelHandle}: ${video.id}`);
+                    const mockMessage = {
+                        channel: {
+                            send: async () => ({
+                                edit: async () => {},
+                                delete: async () => {}
+                            })
+                        },
+                        author: { id: client.user?.id || 'bot' },
+                        client: client
+                    };
+                    await processSingleVideo(video.id, mockMessage, targetChannelId, true, channelHandle);
+                }
+            }
+        } catch (err) {
+            console.error("[YT-AutoCheck] Error in periodic check:", err);
         }
-    }
+    }, 60 * 60 * 1000); // 1 hour
 });
 // ===== BUTTON INTERACTION =====
 
@@ -4022,6 +4064,13 @@ async function fetchVideoLinksAndTitle(videoId) {
 }
 
 async function processSingleVideo(videoId, message, targetChannelId, isAutoMode = false, channelHandle = null) {
+    // Record as processed to avoid duplicates/retries even if it skips/fails
+    await ytProcessedCollection.updateOne(
+        { videoId },
+        { $set: { videoId, processedAt: new Date() } },
+        { upsert: true }
+    );
+
     const { title, links, videoUrl, robloxId, description } = await fetchVideoLinksAndTitle(videoId);
     const finalTitle = title;
     
@@ -4247,19 +4296,36 @@ client.on("messageCreate", async (ytMsg) => {
     // ===== ?yt set <url> =====
     if (subArg === 'set') {
         const urlToFetch = rawArgs[1];
+        let qtyToTrack = parseInt(rawArgs[2]) || 30; // User can specify qty
+
         if (!urlToFetch || (!urlToFetch.includes('youtube.com') && !urlToFetch.includes('youtu.be'))) {
-            return ytMsg.reply('❌ Usage: `?yt set <youtube_url>`\nExample: `?yt set https://www.youtube.com/@ChannelName` or a video link.');
+            return ytMsg.reply('❌ Usage: `?yt set <youtube_url> [qty]`\nExample: `?yt set https://www.youtube.com/@ChannelName 10`');
         }
 
-        const videoMatch = urlToFetch.match(/v=([^&]+)/) || urlToFetch.match(/youtu\.be\/([^?]+)/);
+        const videoMatch = urlToFetch.match(/v=([^&]+)/) || urlToFetch.match(/youtu.be/([^?]+)/);
         if (videoMatch) {
              const videoId = videoMatch[1];
              await ytMsg.reply(`⏳ Processing single video \`${videoId}\`... outputting to <#${TARGET_CHANNEL_ID}>`);
              await processSingleVideo(videoId, ytMsg, TARGET_CHANNEL_ID);
              return;
         } else {
-             await ytMsg.reply(`⏳ Scanning channel \`${urlToFetch}\`... outputting to <#${TARGET_CHANNEL_ID}>`);
-             const res = await scanYouTubeChannel(urlToFetch, ytMsg, TARGET_CHANNEL_ID, 30);
+             let channelHandle = parseYouTubeChannelUrl(urlToFetch);
+             if (!channelHandle) {
+                 const atMatch = urlToFetch.match(/@([^\/?&\s]+)/);
+                 if (atMatch) channelHandle = atMatch[1];
+             }
+
+             if (channelHandle) {
+                 await ytTrackedCollection.updateOne(
+                     { channelHandle },
+                     { $set: { channelHandle, channelUrl: urlToFetch, qty: qtyToTrack, addedBy: ytMsg.author.id, addedAt: new Date() } },
+                     { upsert: true }
+                 );
+                 await ytMsg.reply(`⏳ Tracking & scanning channel \`${channelHandle}\` (Top ${qtyToTrack} videos)... outputting to <#${TARGET_CHANNEL_ID}>\n(Auto-check enabled: every 1 hour)`);
+             } else {
+                 await ytMsg.reply(`⏳ Scanning channel \`${urlToFetch}\` (Top ${qtyToTrack} videos)... outputting to <#${TARGET_CHANNEL_ID}>`);
+             }
+             const res = await scanYouTubeChannel(urlToFetch, ytMsg, TARGET_CHANNEL_ID, qtyToTrack);
              if (!res.success) {
                   return ytMsg.channel.send(`❌ Scan failed: ${res.reason}`);
              }
@@ -4282,9 +4348,10 @@ client.on("messageCreate", async (ytMsg) => {
         }
 
         if (channelHandle) {
-             await ytMsg.reply(`⏳ Removing channel \`${channelHandle}\` scripts from DB...`);
+             await ytMsg.reply(`⏳ Removing channel \`${channelHandle}\` scripts and tracking from DB...`);
+             await ytTrackedCollection.deleteOne({ channelHandle: channelHandle });
              const res = await ytCollection.deleteMany({ channelHandle: channelHandle });
-             return ytMsg.reply(`✅ Removed ${res.deletedCount} scripts from channel \`${channelHandle}\`.`);
+             return ytMsg.reply(`✅ Removed ${res.deletedCount} scripts from channel \`${channelHandle}\` and stopped tracking.`);
         }
         
         const removedScript = await ytCollection.deleteOne({ scriptName: channelUrl });
