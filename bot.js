@@ -149,7 +149,7 @@ const GITHUB_BACKUP_REPO = "backup";
 const GITHUB_DIRECTX_REPO = "directx";
 const GITHUB_BACKOPS_REPO = "backops";
 const GITHUB_BRANCH = "main";
-const REPO_OWNER = GITHUB_OWNER; // Using GITHUB_OWNER as fallback since REPO_OWNER is not provided
+const REPO_OWNER = process.env.REPO_OWNER || "nitroglitch5444"; // ?repo wala
 
 // ========================================
 // IZEN BYPASS API CONFIGURATION
@@ -408,12 +408,15 @@ async function getBrowser() {
     console.log('🚀 Launching new browser session...');
     globalBrowser = await puppeteer.launch({
         headless: "new",
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-software-rasterizer',
             '--no-first-run',
             '--no-zygote',
             '--single-process'
@@ -3796,8 +3799,49 @@ function titleToScriptName(title) {
 
 // ---- Helper: fetch YouTube channel's latest 30 video IDs via RSS (no API key needed) ----
 async function fetchYouTubeVideoIds(channelInput) {
-    // channelInput is whatever comes after youtube.com/ — handle, channel ID, etc.
-    // Try RSS feed by channel ID first, then handle
+    // try YouTube API v3 first if key is available
+    if (process.env.YOUTUBE_API_KEY) {
+        try {
+            let channelId = channelInput;
+            if (!channelId.startsWith('UC')) {
+                // Resolve handle to channel ID
+                const searchRes = await axios.get(`https://www.googleapis.com/youtube/v3/search`, {
+                    params: {
+                        part: 'snippet',
+                        q: channelInput,
+                        type: 'channel',
+                        key: process.env.YOUTUBE_API_KEY,
+                        maxResults: 1
+                    }
+                });
+                channelId = searchRes.data.items[0]?.id?.channelId;
+            }
+
+            if (channelId) {
+                const videoRes = await axios.get(`https://www.googleapis.com/youtube/v3/search`, {
+                    params: {
+                        part: 'snippet',
+                        channelId: channelId,
+                        maxResults: 30,
+                        order: 'date',
+                        type: 'video',
+                        key: process.env.YOUTUBE_API_KEY
+                    }
+                });
+                if (videoRes.data.items?.length > 0) {
+                    return videoRes.data.items.map(item => ({
+                        id: item.id.videoId,
+                        title: item.snippet.title,
+                        channelId: channelId
+                    }));
+                }
+            }
+        } catch (e) {
+            console.error('YouTube API v3 Error:', e.response?.data || e.message);
+        }
+    }
+
+    // Fallback to RSS/Scraping
     const rssUrls = [];
 
     if (channelInput.startsWith('UC')) {
