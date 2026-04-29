@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "build": "echo 'No build step needed'"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
     "mongodb": "^6.3.0",
     "axios": "^1.6.5",
-    "puppeteer": "^24.15.0"
+    "puppeteer": "^24.15.0",
+    "dotenv": "^16.3.1"
   }
 }
