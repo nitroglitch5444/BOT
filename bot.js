@@ -2353,7 +2353,7 @@ if (cmd === "?modhelp" || cmd === "?mp") {
                     "`?yt remove <channel_url>` - Remove a channel and its scripts\n" +
                     "`?yt <name or number>` - Get loadstring for any script\n" +
                     "`?ytl` - View list of **manually** bypassed scripts\n" +
-                    "`?ytsl` - View list of **auto-scanned** scripts & tracked channels\n" +
+                    "`?ytsl` / `?ytul` - View list of **auto-scanned** scripts & tracked channels\n" +
                     "`?ytsu` - View list of YouTube channels being auto-scanned\n\n" +
                     "**Aliases:** `?youtube` works everywhere `?yt` does",
                 inline: false
@@ -3909,16 +3909,42 @@ function extractBypassLinks(text) {
     return found.filter(url => needsBypass(url));
 }
 
-// ---- Helper: fetch YouTube video description and top comments via scraping ----
+// ---- Helper: extract Roblox Game ID from a string ----
+function extractGameId(text) {
+    if (!text) return null;
+    const match = text.match(/roblox\.com\/games\/(\d+)/i);
+    return match ? match[1] : null;
+}
+
+// ---- Helper: parse video title into name and features ----
+function parseVideoTitle(title) {
+    // Example: "🦅 +1 Speed Wings Escape Script - FAST WINS, TRAIN, REBIRTH"
+    // Split by "Script -"
+    const parts = title.split(/Script\s*-/i);
+    
+    // Name part: Before "Script -" (Remove emoji, numbers, space, symbols -> only letters)
+    let namePart = parts[0] || "";
+    let name = namePart.replace(/[^a-zA-Z]/g, '').trim();
+    if (!name) name = "YouTubeScript";
+
+    // Features part: After "Script -"
+    let features = parts[1] ? parts[1].trim() : "";
+    
+    return { name, features };
+}
+
+// ---- Helper: fetch YouTube video metadata, top comments (20) & gameId ----
 async function fetchVideoLinksAndTitle(videoId) {
     const url = `https://www.youtube.com/watch?v=${videoId}`;
     let title = '';
+    let description = '';
     let allLinks = [];
+    let gameId = null;
 
     // Try YouTube API v3 first if available
     if (process.env.YOUTUBE_API_KEY) {
         try {
-            // 1. Fetch Video Metadata (Title & Description)
+            // 1. Fetch Video Metadata
             const videoRes = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
                 params: {
                     part: 'snippet',
@@ -3931,17 +3957,18 @@ async function fetchVideoLinksAndTitle(videoId) {
             const vItem = videoRes.data.items?.[0];
             if (vItem) {
                 title = vItem.snippet.title;
-                const desc = vItem.snippet.description;
-                allLinks.push(...extractBypassLinks(desc));
+                description = vItem.snippet.description;
+                allLinks.push(...extractBypassLinks(description));
+                gameId = extractGameId(description);
             }
 
-            // 2. Fetch Top Comments (Pinned comments are usually at the top)
+            // 2. Fetch Top 20 Comments
             try {
                 const commentRes = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
                     params: {
                         part: 'snippet',
                         videoId: videoId,
-                        maxResults: 15,
+                        maxResults: 20,
                         order: 'relevance',
                         key: process.env.YOUTUBE_API_KEY
                     },
@@ -3952,27 +3979,24 @@ async function fetchVideoLinksAndTitle(videoId) {
                     for (const thread of commentRes.data.items) {
                         const topComment = thread.snippet?.topLevelComment?.snippet;
                         if (topComment) {
-                            // Extract links from both textOriginal (raw) and textDisplay (rendered html)
-                            allLinks.push(...extractBypassLinks(topComment.textOriginal || ''));
-                            allLinks.push(...extractBypassLinks(topComment.textDisplay || ''));
+                            const commText = topComment.textOriginal || topComment.textDisplay || '';
+                            allLinks.push(...extractBypassLinks(commText));
                         }
                     }
                 }
             } catch (ce) {
                 console.error(`Comment API error for ${videoId}:`, ce.message);
-                // Comments might be disabled, ignore and continue with desc links
             }
 
             if (allLinks.length > 0 || title) {
-                return { title, links: [...new Set(allLinks)], videoUrl: url };
+                return { title, links: [...new Set(allLinks)], gameId, videoUrl: url };
             }
         } catch (e) {
             console.error(`YouTube API error for ${videoId}:`, e.message);
-            // Fall back to scraping if API fails
         }
     }
 
-    // Fallback: Scrape description from HTML
+    // Fallback: Scrape description from HTML for title/links/gameId
     try {
         const res = await axios.get(url, {
             timeout: 20000,
@@ -3983,31 +4007,32 @@ async function fetchVideoLinksAndTitle(videoId) {
         });
         const html = res.data;
 
-        // Extract title
         if (!title) {
             const ogTitle = html.match(/<meta property="og:title" content="([^"]+)"/);
             if (ogTitle) title = ogTitle[1].replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
         }
 
-        // Extract description from ytInitialData json blobs
         let descLinks = [];
         const descMatch = html.match(/"description":\{"simpleText":"((?:[^"\\]|\\.)*)"\}/);
         if (descMatch) {
             const desc = descMatch[1].replace(/\\n/g, '\n').replace(/\\u0026/g, '&');
+            description = desc;
             descLinks.push(...extractBypassLinks(desc));
+            if (!gameId) gameId = extractGameId(desc);
         }
         
         const shortDesc = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
         if (shortDesc) {
             const sd = shortDesc[1].replace(/\\n/g, '\n').replace(/\\u0026/g, '&');
             descLinks.push(...extractBypassLinks(sd));
+            if (!gameId) gameId = extractGameId(sd);
         }
 
         allLinks.push(...descLinks);
-        return { title, links: [...new Set(allLinks)], videoUrl: url };
+        return { title, links: [...new Set(allLinks)], gameId, videoUrl: url };
     } catch (e) {
         console.error(`fetchVideoLinksAndTitle fallback error for ${videoId}:`, e.message);
-        return { title: title || '', links: [...new Set(allLinks)], videoUrl: url };
+        return { title: title || '', links: [...new Set(allLinks)], gameId, videoUrl: url };
     }
 }
 
@@ -4025,7 +4050,7 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
     await message.channel.send(`🔍 Fetching latest videos from \`${channelHandle}\`...`);
 
     const videos = await fetchYouTubeVideoIds(channelHandle);
-    if (!videos.length) return { success: false, reason: 'Could not fetch videos. Check the channel URL and make sure it is a public channel.' };
+    if (!videos.length) return { success: false, reason: 'Could not fetch videos. Check the channel URL or try again later.' };
 
     // PERSISTENCE: Get last processed video ID
     const config = await ytTrackedCollection.findOne({ channelUrl });
@@ -4034,127 +4059,140 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
     // Slice to user-defined limit or default
     const videosToProcess = videos.slice(0, limit);
 
-    await message.channel.send(`📹 Found **${videos.length}** videos. Processing up to **${videosToProcess.length}** latest...`);
+    await message.channel.send(`📹 Found **${videos.length}** videos. Processing up to **${videosToProcess.length}** latest (1 by 1)...`);
 
     const results = [];
-    let processed = 0;
+    let processedCount = 0;
     
     // The very first video in the list (newest) will be our new checkpoint after we finish
     const latestId = videosToProcess[0]?.id;
 
     for (const video of videosToProcess) {
-        // Check if already processed globally
-        const isProcessed = await ytProcessedCollection.findOne({ videoId: video.id });
-        if (isProcessed) {
-            results.push({ scriptName: video.title, skipped: true });
-            continue;
+        try {
+            // Check if already processed globally
+            const isProcessed = await ytProcessedCollection.findOne({ videoId: video.id });
+            if (isProcessed) {
+                results.push({ scriptName: video.title, skipped: true });
+                continue;
+            }
+
+            // STOP if we hit a video we already processed last time for THIS channel
+            if (lastVideoId && video.id === lastVideoId) {
+                await message.channel.send(`⏭️ Reached last processed video (\`${video.id}\`), stopping scan.`);
+                break;
+            }
+
+            const videoIdx = videosToProcess.indexOf(video) + 1;
+            const statusMsg = await message.channel.send(`⚙️ **[Video ${videoIdx}/${videosToProcess.length}]** Starting process for \`${video.title}\`...`);
+
+            // 1. Fetch Links & Metadata
+            await statusMsg.edit(`🔍 **[Video ${videoIdx}]** Step 1: Fetching description and comments...`);
+            const { title, links, gameId, videoUrl } = await fetchVideoLinksAndTitle(video.id);
+            const finalTitle = title || video.title;
+
+            // Only process if title contains "Script"
+            if (!/Script/i.test(finalTitle)) {
+                await statusMsg.edit(`⏭️ **[Video ${videoIdx}]** No "Script" in title, skipping.`);
+                setTimeout(() => statusMsg.delete().catch(() => {}), 3000);
+                continue;
+            }
+
+            if (!links.length) {
+                await statusMsg.edit(`⏭️ **[Video ${videoIdx}]** No bypassable links found, skipping.`);
+                setTimeout(() => statusMsg.delete().catch(() => {}), 3000);
+                continue;
+            }
+
+            // Parse title for name and features
+            const { name: rawName, features } = parseVideoTitle(finalTitle);
+            
+            // Unique naming logic
+            let scriptName = rawName;
+            let counter = 1;
+            while (await ytCollection.findOne({ scriptName })) {
+                scriptName = `${rawName}${counter}`;
+                counter++;
+            }
+
+            // 2. Bypass Link
+            await statusMsg.edit(`🔄 **[Video ${videoIdx}]** Step 2: Bypassing link (\`${links[0]}\`)...`);
+            bypassInProgress = true;
+            const bypassResult = await recursiveBypassWithIzen(links[0], message);
+            bypassInProgress = false;
+
+            if (bypassResult.error || bypassResult.stopped) {
+                await statusMsg.edit(`❌ **[Video ${videoIdx}]** Bypass failed: ${bypassResult.message || 'stopped'}`);
+                throw new Error(bypassResult.message || 'Bypass stopped');
+            }
+
+            const finalUrl = bypassResult.result;
+
+            // 3. Obfuscate & Upload
+            await statusMsg.edit(`🛡️ **[Video ${videoIdx}]** Step 3: Obfuscating and uploading to GitHub...`);
+            const baseScript = generateKeySystemScript(finalUrl, video.id);
+            const obfuscated = await obfuscateCode(baseScript);
+            
+            const fileName = `${scriptName}.lua`;
+            const githubUrl = await createGitHubFile(scriptName, obfuscated || baseScript, GITHUB_REPO);
+
+            if (!githubUrl) {
+                throw new Error('GitHub upload failed');
+            }
+
+            // Backup original if obfuscated
+            if (obfuscated) await createGitHubFile(scriptName, baseScript, GITHUB_BACKUP_REPO);
+
+            // 4. Save to DB
+            await ytCollection.insertOne({
+                videoId: video.id,
+                scriptName,
+                fileName,
+                channelUrl,
+                channelHandle,
+                videoUrl: `https://www.youtube.com/watch?v=${video.id}`,
+                videoTitle: finalTitle,
+                originalLink: links[0],
+                bypassedLink: finalUrl,
+                githubUrl,
+                obfuscated: !!obfuscated,
+                gameId: gameId || 'N/A',
+                features: features || 'N/A',
+                addedAt: new Date(),
+                source
+            });
+
+            await ytProcessedCollection.insertOne({
+                videoId: video.id,
+                channelUrl,
+                processedAt: new Date()
+            });
+
+            // 5. Log to Discord Channel (YT_LOG_CHANNEL_ID)
+            const logChannelId = process.env.YT_LOG_CHANNEL_ID;
+            if (logChannelId) {
+                const logChannel = client.channels.cache.get(logChannelId);
+                if (logChannel) {
+                    const loadstringCode = `loadstring(game:HttpGet("${githubUrl}"))()`;
+                    const logContent = `${loadstringCode}\n${features || 'No Features Found'}\n${gameId || 'No Game ID Found'}`;
+                    await logChannel.send(logContent);
+                }
+            }
+
+            await statusMsg.edit(`✅ **[Video ${videoIdx}]** Successfully processed \`${scriptName}\`!`);
+            processedCount++;
+            results.push({ scriptName, success: true });
+
+            // Small delay between videos
+            await new Promise(r => setTimeout(r, 2000));
+
+        } catch (err) {
+            console.error(`Error processing video ${video.id}:`, err.message);
+            await message.channel.send(`🚨 **Critical Error during video ${video.id} processing:** ${err.message}\nScan stopped.`);
+            return { success: false, reason: `Error at video ${video.id}: ${err.message}`, processed: processedCount, results };
         }
-
-        // STOP if we hit a video we already processed last time for THIS channel
-        if (lastVideoId && video.id === lastVideoId) {
-            await message.channel.send(`⏭️ Reached last processed video (\`${video.id}\`), stopping scan.`);
-            break;
-        }
-
-        const { title, links, videoUrl } = await fetchVideoLinksAndTitle(video.id);
-        const finalTitle = title || video.title;
-
-        // Only process if title contains "Script"
-        if (!/Script/i.test(finalTitle)) continue;
-        if (!links.length) continue;
-
-        const scriptName = titleToScriptName(finalTitle);
-        if (!scriptName || scriptName.length < 2) continue;
-
-        processed++;
-        const statusMsg = await message.channel.send(`⚙️ **[${processed}]** Processing: \`${finalTitle}\`...`);
-
-        // Check if already exists in DB (by scriptName or videoId)
-        const existing = await ytCollection.findOne({ $or: [{ scriptName }, { videoId: video.id }] });
-        if (existing) {
-            await statusMsg.edit(`⏭️ **[${processed}]** \`${scriptName}\` already exists, skipping.`);
-            setTimeout(() => statusMsg.delete().catch(() => {}), 3000);
-            results.push({ scriptName, skipped: true });
-            continue;
-        }
-
-        // Take first bypass link found
-        const bypassLink = links[0];
-
-        // Bypass the link
-        await statusMsg.edit(`🔄 **[${processed}]** Bypassing link for \`${scriptName}\`...`);
-        bypassInProgress = true;
-        bypassStopRequested = false;
-        const bypassResult = await recursiveBypassWithIzen(bypassLink, message);
-        bypassInProgress = false;
-
-        if (bypassResult.error || bypassResult.stopped) {
-            await statusMsg.edit(`❌ **[${processed}]** Bypass failed for \`${scriptName}\`: ${bypassResult.message || 'stopped'}`);
-            setTimeout(() => statusMsg.delete().catch(() => {}), 4000);
-            results.push({ scriptName, failed: true, reason: bypassResult.message });
-            continue;
-        }
-
-        const finalUrl = bypassResult.result;
-
-        // Generate key system script
-        const finalScript = generateKeySystemScript(finalUrl);
-
-    await message.channel.send("⏳ Obfuscating script...");
-
-    const obfuscatedScript = await obfuscateCode(finalScript);
-
-    if (!obfuscatedScript) {
-        await message.channel.send("⚠️ Obfuscation failed. Uploading original...");
     }
 
-    // Upload to GitHub
-    const fileName = `${scriptName}.lua`; // fileName needed for inserts
-    const githubUrl = await createGitHubFile(scriptName, obfuscatedScript || finalScript, GITHUB_REPO);
-    
-    if (!githubUrl) {
-        await statusMsg.edit(`❌ **[${processed}]** GitHub upload failed for \`${scriptName}\`.`);
-        setTimeout(() => statusMsg.delete().catch(() => {}), 4000);
-        results.push({ scriptName, failed: true, reason: 'GitHub upload failed' });
-        continue;
-    }
-
-    // Backup
-    await createGitHubFile(scriptName, finalScript, GITHUB_BACKUP_REPO);
-
-        // Save to MongoDB
-        await ytCollection.insertOne({
-            videoId: video.id,
-            scriptName,
-            fileName,
-            channelUrl,
-            channelHandle,
-            videoUrl,
-            videoTitle: finalTitle,
-            originalLink: bypassLink,
-            bypassedLink: finalUrl,
-            githubUrl,
-            obfuscated: !!obfuscatedScript,
-            addedAt: new Date(),
-            source // 'auto' or 'manual'
-        });
-
-        // Mark as processed
-        await ytProcessedCollection.insertOne({
-            videoId: video.id,
-            channelUrl,
-            processedAt: new Date()
-        });
-
-        await statusMsg.edit(`✅ **[${processed}]** \`${scriptName}\` done!`);
-        setTimeout(() => statusMsg.delete().catch(() => {}), 4000);
-        results.push({ scriptName, githubUrl, videoUrl, success: true });
-
-        // Small delay to avoid rate limits
-        await new Promise(r => setTimeout(r, 2000));
-    }
-
-    // Update persistence checkpoint to most recent video ID
+    // Update persistence checkpoint
     if (latestId && source === 'auto') {
         await ytTrackedCollection.updateOne(
             { channelUrl },
@@ -4163,7 +4201,7 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
         );
     }
 
-    return { success: true, results };
+    return { success: true, results, processed: processedCount };
 }
 
 // ===== YT / YOUTUBE COMMAND HANDLER =====
@@ -4176,7 +4214,7 @@ client.on("messageCreate", async (ytMsg) => {
 
     const isYtCmd = rawCmd === '?yt' || rawCmd === '?youtube';
     const isYtListCmd = ['?ytl', '?youtubel', '?youtubelist', '?ytlist'].includes(rawCmd);
-    const isYtScanListCmd = rawCmd === '?ytsl';
+    const isYtScanListCmd = rawCmd === '?ytsl' || rawCmd === '?ytul';
     const isYtStatusCmd = rawCmd === '?ytsu' || rawCmd === '?ytstatus';
 
     if (!isYtCmd && !isYtListCmd && !isYtScanListCmd && !isYtStatusCmd) return;
@@ -4280,7 +4318,7 @@ client.on("messageCreate", async (ytMsg) => {
         }
 
         // Check if already being tracked
-        const existing = await ytCollection.findOne({ channelUrl, type: 'config' });
+        const existing = await ytTrackedCollection.findOne({ channelUrl });
         if (existing) {
             await ytMsg.reply(`🔄 **Resuming scan** for \`${channelUrl}\` (processing latest **${count}** videos)...`);
         } else {
@@ -4369,42 +4407,58 @@ client.on("messageCreate", async (ytMsg) => {
         
         if (!videoId) return ytMsg.reply('❌ Invalid YouTube video URL.');
 
-        await ytMsg.reply(`⏳ Starting manual bypass for video \`${videoId}\`...`);
+        const statusMsg = await ytMsg.reply(`⏳ **[Step 1/3]** Fetching metadata for video \`${videoId}\`...`);
         
-        // Custom logic for single video to avoid complex scanYouTubeChannel if possible, 
-        // but scanYouTubeChannel already handles everything perfectly. We just pass one ID.
-        // We'll hijack it by passing the video ID instead of channel URL if needed, 
-        // but better to just use a custom mini-scan or pass source='manual'
-        
-        // Actually, scanYouTubeChannel expects a channel URL. Let's make it smarter or handle manually.
         const videoData = await fetchVideoLinksAndTitle(videoId);
-        if (!videoData.links || videoData.links.length === 0) return ytMsg.reply('❌ No bypassable links found in this video.');
+        if (!videoData.links || videoData.links.length === 0) {
+            return statusMsg.edit('❌ No bypassable links found in this video.');
+        }
 
-        const finalUrl = await bypassWithFluxusRetry(videoData.links[0]);
-        if (!finalUrl) return ytMsg.reply('❌ Failed to bypass the link.');
+        const { name: rawName, features } = parseVideoTitle(videoData.title);
+        let scriptName = rawName;
+        let counter = 1;
+        while (await ytCollection.findOne({ scriptName })) {
+            scriptName = `${rawName}${counter}`;
+            counter++;
+        }
 
-        const scriptName = videoData.title.replace(/[^a-zA-Z0-9]/g, '').substring(0, 30) || `ManualYT_${Date.now()}`;
-        const finalScript = generateScriptTemplate(videoData.title, finalUrl, `https://www.youtube.com/watch?v=${videoId}`);
+        await statusMsg.edit(`🔄 **[Step 2/3]** Bypassing link (\`${videoData.links[0]}\`)...`);
+        const finalUrl = await recursiveBypassWithIzen(videoData.links[0], ytMsg);
         
-        const obfuscated = await obfuscateCode(finalScript);
-        const fileName = `${scriptName}_${Date.now()}.lua`;
-        const githubUrl = await createGitHubFile(scriptName, obfuscated || finalScript, GITHUB_REPO);
+        if (!finalUrl || finalUrl.error) {
+            return statusMsg.edit(`❌ Bypass failed: ${finalUrl?.message || 'Unknown error'}`);
+        }
+
+        const bypassResult = typeof finalUrl === 'string' ? finalUrl : finalUrl.result;
+
+        await statusMsg.edit(`🛡️ **[Step 3/3]** Obfuscating and saving script \`${scriptName}\`...`);
+        const baseScript = generateKeySystemScript(bypassResult, videoId);
+        const obfuscated = await obfuscateCode(baseScript);
+        
+        const githubUrl = await createGitHubFile(scriptName, obfuscated || baseScript, GITHUB_REPO);
+        if (!githubUrl) return statusMsg.edit('❌ GitHub upload failed.');
 
         await ytCollection.insertOne({
             videoId,
             scriptName,
-            fileName,
+            fileName: `${scriptName}.lua`,
             videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
             videoTitle: videoData.title,
             originalLink: videoData.links[0],
-            bypassedLink: finalUrl,
+            bypassedLink: bypassResult,
             githubUrl,
             obfuscated: !!obfuscated,
+            gameId: videoData.gameId || 'N/A',
+            features: features || 'N/A',
             addedAt: new Date(),
             source: 'manual'
         });
 
-        return ytMsg.reply(`✅ Manual bypass complete: \`${scriptName}\` saved! View with \`?ytl\`.`);
+        const loadstringCode = `loadstring(game:HttpGet("${githubUrl}"))()`;
+        const finalLog = `${loadstringCode}\n${features || 'No Features Found'}\n${videoData.gameId || 'No Game ID Found'}`;
+
+        await statusMsg.edit(`✅ **Bypass Complete!**\n\n${finalLog}`);
+        return;
     }
 
     // Check if query is a channel URL (fallback for yt set)
@@ -4526,7 +4580,6 @@ async function startYouTubeBackgroundLoop() {
 // Connect to database and login
 connectDB().then(() => {
     client.login(process.env.DISCORD_TOKEN);
-    startYouTubeBackgroundLoop();
 }).catch(err => {
     console.error("Failed to start bot:", err);
     process.exit(1);
