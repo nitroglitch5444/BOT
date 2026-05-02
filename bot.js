@@ -2353,7 +2353,8 @@ if (cmd === "?modhelp" || cmd === "?mp") {
                     "`?yt remove <channel_url>` - Remove a channel and its scripts\n" +
                     "`?yt <name or number>` - Get loadstring for any script\n" +
                     "`?ytl` - View list of **manually** bypassed scripts\n" +
-                    "`?ytsl` - View list of **auto-scanned** scripts & tracked channels\n\n" +
+                    "`?ytsl` - View list of **auto-scanned** scripts & tracked channels\n" +
+                    "`?ytsu` - View list of YouTube channels being auto-scanned\n\n" +
                     "**Aliases:** `?youtube` works everywhere `?yt` does",
                 inline: false
             },
@@ -4176,8 +4177,9 @@ client.on("messageCreate", async (ytMsg) => {
     const isYtCmd = rawCmd === '?yt' || rawCmd === '?youtube';
     const isYtListCmd = ['?ytl', '?youtubel', '?youtubelist', '?ytlist'].includes(rawCmd);
     const isYtScanListCmd = rawCmd === '?ytsl';
+    const isYtStatusCmd = rawCmd === '?ytsu' || rawCmd === '?ytstatus';
 
-    if (!isYtCmd && !isYtListCmd && !isYtScanListCmd) return;
+    if (!isYtCmd && !isYtListCmd && !isYtScanListCmd && !isYtStatusCmd) return;
 
     // Staff check for all yt commands
     if (!(await isStaff(ytMsg.author.id, ytMsg.member)) && ytMsg.author.id !== OWNER_ID) {
@@ -4217,6 +4219,29 @@ client.on("messageCreate", async (ytMsg) => {
             .setDescription(desc)
             .setColor('Red')
             .setFooter({ text: `Auto Scripts: ${autoScripts.length} | Tracked: ${tracked.length}` })
+            .setTimestamp();
+
+        return ytMsg.reply({ embeds: [embed] });
+    }
+
+    // ===== ?ytsu =====
+    if (isYtStatusCmd) {
+        const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
+        if (!tracked.length) return ytMsg.reply('📭 No YouTube channels currently tracked for auto-scanning.');
+
+        let list = '**📋 YouTube Auto-Scan Channels:**\n\n';
+        tracked.forEach((c, i) => {
+            list += `**${i + 1}.** \`${c.channelHandle || c.channelUrl}\`\n`;
+            list += `   • Latest Video: \`${c.lastProcessedVideoId || 'None'}\`\n`;
+            list += `   • Scan Limit: \`${c.limit || 30}\`\n`;
+            list += `   • Updated: <t:${Math.floor(c.updatedAt.getTime() / 1000)}:R>\n\n`;
+        });
+
+        const embed = new EmbedBuilder()
+            .setTitle('📺 YouTube Auto-Scan Status')
+            .setDescription(list)
+            .setColor('Red')
+            .setFooter({ text: `Total: ${tracked.length} tracked channels` })
             .setTimestamp();
 
         return ytMsg.reply({ embeds: [embed] });
