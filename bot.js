@@ -2351,10 +2351,12 @@ if (cmd === "?modhelp" || cmd === "?mp") {
                     "`?yt <video_url>` - Bypass a single video and save to `?ytl` (Manual list)\n" +
                     "`?yt set <channel_url> [quantity]` - Track a channel, scan latest videos, save to `?ytsl` (Auto list)\n" +
                     "`?yt remove <channel_url>` - Remove a channel and its scripts\n" +
-                    "`?yt <name or number>` - Get loadstring for any script\n" +
+                    "`?yt <name or number>` - Search in Manual list (or both)\n" +
+                    "`?yts <name or number>` - Search in Auto-Scanned list\n" +
                     "`?ytl` - View list of **manually** bypassed scripts\n" +
-                    "`?ytsl` / `?ytul` - View list of **auto-scanned** scripts & tracked channels\n" +
-                    "`?ytsu` - View list of YouTube channels being auto-scanned\n\n" +
+                    "`?ytsl` - View list of **auto-scanned** scripts\n" +
+                    "`?ytul` - View list of tracked channel URLs\n" +
+                    "`?ytsu` - View auto-scan status\n\n" +
                     "**Aliases:** `?youtube` works everywhere `?yt` does",
                 inline: false
             },
@@ -3800,6 +3802,8 @@ function titleToScriptName(title) {
     return name || null;
 }
 
+const activeScans = new Set();
+
 // ---- Helper: fetch YouTube channel's latest 30 video IDs via RSS (no API key needed) ----
 async function fetchYouTubeVideoIds(channelInput) {
     // try YouTube API v3 first if key is available
@@ -3884,9 +3888,16 @@ async function fetchYouTubeVideoIds(channelInput) {
             timeout: 15000,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' }
         });
+        
+        let channelId = null;
         const cidMatch = page.data.match(/"channelId"\s*:\s*"(UC[^"]+)"/);
-        if (cidMatch) {
-            const rss = await axios.get(`https://www.youtube.com/feeds/videos.xml?channel_id=${cidMatch[1]}`, { timeout: 15000 });
+        const browseIdMatch = page.data.match(/"browseId"\s*:\s*"(UC[^"]+)"/);
+        const canonicalMatch = page.data.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[^"]+)">/);
+        
+        channelId = cidMatch?.[1] || browseIdMatch?.[1] || canonicalMatch?.[1];
+
+        if (channelId) {
+            const rss = await axios.get(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { timeout: 15000 });
             const ids = [];
             const titles = [];
             const regex = /<yt:videoId>([^<]+)<\/yt:videoId>/g;
@@ -3919,18 +3930,21 @@ function extractGameId(text) {
 // ---- Helper: parse video title into name and features ----
 function parseVideoTitle(title) {
     // Example: "🦅 +1 Speed Wings Escape Script - FAST WINS, TRAIN, REBIRTH"
-    // Split by "Script -"
-    const parts = title.split(/Script\s*-/i);
+    // Remove symbols/emojis
+    let clean = title.replace(/[\u{1F300}-\u{1FFFF}]/gu, '').replace(/[^\x00-\x7F]/g, '').trim(); 
     
-    // Name part: Before "Script -" (Remove emoji, numbers, space, symbols -> only letters)
+    // Split by "Script" keyword
+    const parts = clean.split(/Script/i);
     let namePart = parts[0] || "";
-    let name = namePart.replace(/[^a-zA-Z]/g, '').trim();
-    if (!name) name = "YouTubeScript";
-
-    // Features part: After "Script -"
-    let features = parts[1] ? parts[1].trim() : "";
     
-    return { name, features };
+    // Remove everything that isn't a letter from the name
+    let name = namePart.replace(/[^a-zA-Z]/g, '').trim();
+    if (!name || name.length < 2) name = "YouTubeScript";
+
+    // Features: everything after the first "Script -" or "Script"
+    let featurePart = clean.substring(clean.toLowerCase().indexOf('script') + 6).replace(/^[ \-]+/, '').trim();
+    
+    return { name, features: featurePart };
 }
 
 // ---- Helper: fetch YouTube video metadata, top comments (20) & gameId ----
@@ -4038,14 +4052,24 @@ async function fetchVideoLinksAndTitle(videoId) {
 
 // ---- Main: scan a channel, process all videos ----
 async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'auto') {
-    // Parse channel handle/ID from URL
-    let channelHandle = parseYouTubeChannelUrl(channelUrl);
-    if (!channelHandle) {
-        // Try bare handle like @SomeChannel
-        const atMatch = channelUrl.match(/@([^\/?&\s]+)/);
-        if (atMatch) channelHandle = atMatch[1];
+    if (activeScans.has(channelUrl)) {
+        console.log(`⚠️ Scan already in progress for ${channelUrl}, skipping.`);
+        return { success: false, reason: 'A scan for this channel is already in progress.' };
     }
-    if (!channelHandle) return { success: false, reason: 'Could not parse YouTube channel URL.' };
+    activeScans.add(channelUrl);
+
+    try {
+        // Parse channel handle/ID from URL
+        let channelHandle = parseYouTubeChannelUrl(channelUrl);
+        if (!channelHandle) {
+            // Try bare handle like @SomeChannel
+            const atMatch = channelUrl.match(/@([^\/?&\s]+)/);
+            if (atMatch) channelHandle = atMatch[1];
+        }
+        if (!channelHandle) {
+            activeScans.delete(channelUrl);
+            return { success: false, reason: 'Could not parse YouTube channel URL.' };
+        }
 
     await message.channel.send(`🔍 Fetching latest videos from \`${channelHandle}\`...`);
 
@@ -4202,6 +4226,9 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
     }
 
     return { success: true, results, processed: processedCount };
+    } finally {
+        activeScans.delete(channelUrl);
+    }
 }
 
 // ===== YT / YOUTUBE COMMAND HANDLER =====
@@ -4213,50 +4240,53 @@ client.on("messageCreate", async (ytMsg) => {
     const rawCmd = rawArgs.shift()?.toLowerCase();
 
     const isYtCmd = rawCmd === '?yt' || rawCmd === '?youtube';
-    const isYtListCmd = ['?ytl', '?youtubel', '?youtubelist', '?ytlist'].includes(rawCmd);
-    const isYtScanListCmd = rawCmd === '?ytsl' || rawCmd === '?ytul';
+    const isYtManualListCmd = ['?ytl', '?ytlist', '?youtubelist'].includes(rawCmd);
+    const isYtAutoListCmd = ['?ytsl', '?youtubesl'].includes(rawCmd);
+    const isYtTrackedListCmd = ['?ytul', '?youtubet'].includes(rawCmd);
     const isYtStatusCmd = rawCmd === '?ytsu' || rawCmd === '?ytstatus';
+    const isYtSearchAutoCmd = rawCmd === '?yts' || rawCmd === '?youtubes';
 
-    if (!isYtCmd && !isYtListCmd && !isYtScanListCmd && !isYtStatusCmd) return;
+    if (!isYtCmd && !isYtManualListCmd && !isYtAutoListCmd && !isYtTrackedListCmd && !isYtStatusCmd && !isYtSearchAutoCmd) return;
 
     // Staff check for all yt commands
     if (!(await isStaff(ytMsg.author.id, ytMsg.member)) && ytMsg.author.id !== OWNER_ID) {
         return ytMsg.reply('❌ Staff only command.');
     }
 
-    // ===== ?ytsl =====
-    if (isYtScanListCmd) {
-        const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).limit(20).toArray();
+    // ===== ?ytsl / ?youtubesl (Auto Scripts) =====
+    if (isYtAutoListCmd) {
+        const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).limit(40).toArray();
+        if (!autoScripts.length) return ytMsg.reply('📭 No auto-scanned scripts yet. Use `?yt set <url>` to start tracking channels.');
+
+        let listTitle = '**🤖 Auto-Scanned YouTube Scripts:**\n\n';
+        const lines = autoScripts.map((s, i) => `**${i + 1}.** \`${s.scriptName}\``);
+        
+        const embed = new EmbedBuilder()
+            .setTitle('📺 YouTube Auto-Scan Library')
+            .setDescription(listTitle + lines.join('\n'))
+            .setColor('Red')
+            .setFooter({ text: `Latest ${autoScripts.length} scripts | Use ?yts <number>` })
+            .setTimestamp();
+
+        return ytMsg.reply({ embeds: [embed] });
+    }
+
+    // ===== ?ytul (Tracked Channels List) =====
+    if (isYtTrackedListCmd) {
         const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
-        
-        let desc = '';
-        
-        if (autoScripts.length > 0) {
-            desc += '**🤖 Recently Auto-Bypassed Scripts:**\n';
-            autoScripts.forEach((s, i) => {
-                desc += `**${i + 1}.** \`${s.scriptName}\` (from \`${s.channelHandle || 'YT'}\`)\n`;
-            });
-            desc += '\n';
-        } else {
-            desc += '📭 No auto-bypassed scripts yet.\n\n';
-        }
+        if (!tracked.length) return ytMsg.reply('📭 No YouTube channels currently tracked.');
 
-        if (tracked.length > 0) {
-            desc += '**📋 Tracked Channels:**\n';
-            tracked.forEach((c, i) => {
-                desc += `• \`${c.channelHandle || c.channelUrl}\` (Latest: \`${c.lastProcessedVideoId || 'None'}\`)\n`;
-            });
-        } else {
-            desc += '📋 No channels currently tracked.';
-        }
-
-        desc += `\n\n💡 Use \`?yt <name or number>\` to fetch a script loadstring.`;
+        let desc = '**📋 Tracked YouTube Channels:**\n\n';
+        tracked.forEach((c, i) => {
+            desc += `**${i + 1}.** [${c.channelHandle || c.channelUrl}](https://www.youtube.com/@${c.channelHandle || ''})\n`;
+            desc += `   🔗 URL: \`${c.channelUrl}\`\n\n`;
+        });
+        desc += `💡 Use \`?yt set <url>\` to add more.`;
 
         const embed = new EmbedBuilder()
-            .setTitle('📺 YouTube Auto-Scan List')
+            .setTitle('🎬 Tracked Channel URLs')
             .setDescription(desc)
             .setColor('Red')
-            .setFooter({ text: `Auto Scripts: ${autoScripts.length} | Tracked: ${tracked.length}` })
             .setTimestamp();
 
         return ytMsg.reply({ embeds: [embed] });
@@ -4285,9 +4315,9 @@ client.on("messageCreate", async (ytMsg) => {
         return ytMsg.reply({ embeds: [embed] });
     }
 
-    // ===== ?ytl / ?youtubelist =====
-    if (isYtListCmd) {
-        const manualScripts = await ytCollection.find({ source: 'manual' }).sort({ addedAt: -1 }).toArray();
+    // ===== ?ytl / ?youtubelist (Manual Scripts) =====
+    if (isYtManualListCmd) {
+        const manualScripts = await ytCollection.find({ source: 'manual' }).sort({ addedAt: -1 }).limit(30).toArray();
         if (!manualScripts.length) return ytMsg.reply('📭 No manual YouTube scripts saved yet. Use `?yt <url>` to bypass and save one.');
 
         let list = '**📋 Manually Bypassed YouTube Scripts:**\n\n';
@@ -4304,6 +4334,46 @@ client.on("messageCreate", async (ytMsg) => {
             .setTimestamp();
 
         return ytMsg.reply({ embeds: [embed] });
+    }
+
+    // ===== ?yts <query> (Search Auto Scripts) =====
+    if (isYtSearchAutoCmd) {
+        const query = rawArgs.join(' ').trim();
+        if (!query) return ytMsg.reply('❌ Usage: `?yts <name or number>`');
+
+        const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).toArray();
+        let found = null;
+
+        if (/^\d+$/.test(query)) {
+            const idx = parseInt(query) - 1;
+            if (idx >= 0 && idx < autoScripts.length) found = autoScripts[idx];
+        }
+
+        if (!found) {
+            const norm = query.replace(/\s+/g, '').toLowerCase();
+            found = autoScripts.find(s => s.scriptName.toLowerCase() === norm)
+                 || autoScripts.find(s => s.scriptName.toLowerCase().includes(norm));
+        }
+
+        if (!found) return ytMsg.reply('❌ No auto-scanned script found matching that query.');
+
+        const githubUrl = found.githubUrl;
+        const loadstringCode = `\`\`\`lua\nloadstring(game:HttpGet("${githubUrl}"))()\n\`\`\``;
+        
+        const embed = new EmbedBuilder()
+            .setTitle(`📺 Auto-Scanned: ${found.scriptName}`)
+            .setURL(found.videoUrl)
+            .setColor('Red')
+            .addFields(
+                { name: '🎥 Video Title', value: found.videoTitle || 'Unknown', inline: false },
+                { name: '📄 Features', value: found.features || 'N/A', inline: false },
+                { name: '🎮 Game ID', value: found.gameId || 'N/A', inline: true },
+                { name: '📅 Added', value: `<t:${Math.floor(found.addedAt.getTime() / 1000)}:R>`, inline: true }
+            )
+            .setTimestamp();
+
+        await ytMsg.reply({ embeds: [embed] });
+        return ytMsg.channel.send(loadstringCode);
     }
 
     const subArg = rawArgs[0]?.toLowerCase();
@@ -4407,6 +4477,10 @@ client.on("messageCreate", async (ytMsg) => {
         
         if (!videoId) return ytMsg.reply('❌ Invalid YouTube video URL.');
 
+        // Prevent double processing if multiple handlers exist
+        if (ytMsg.ytProcessing) return;
+        ytMsg.ytProcessing = true;
+
         const statusMsg = await ytMsg.reply(`⏳ **[Step 1/3]** Fetching metadata for video \`${videoId}\`...`);
         
         const videoData = await fetchVideoLinksAndTitle(videoId);
@@ -4438,7 +4512,7 @@ client.on("messageCreate", async (ytMsg) => {
         const githubUrl = await createGitHubFile(scriptName, obfuscated || baseScript, GITHUB_REPO);
         if (!githubUrl) return statusMsg.edit('❌ GitHub upload failed.');
 
-        await ytCollection.insertOne({
+        const manualData = {
             videoId,
             scriptName,
             fileName: `${scriptName}.lua`,
@@ -4452,7 +4526,9 @@ client.on("messageCreate", async (ytMsg) => {
             features: features || 'N/A',
             addedAt: new Date(),
             source: 'manual'
-        });
+        };
+
+        await ytCollection.insertOne(manualData);
 
         const loadstringCode = `loadstring(game:HttpGet("${githubUrl}"))()`;
         const finalLog = `${loadstringCode}\n${features || 'No Features Found'}\n${videoData.gameId || 'No Game ID Found'}`;
