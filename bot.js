@@ -2348,11 +2348,12 @@ if (cmd === "?modhelp" || cmd === "?mp") {
             {
                 name: "**YouTube Script Commands** (Staff Only)",
                 value:
-                    "`?yt set <channel_url> [quantity]` - Add a YT channel, scan latest videos, bypass & upload scripts\n" +
-                    "`?yt remove <channel_url>` - Remove a YT channel and all its scripts\n" +
-                    "`?yt <name or number>` - Get loadstring for a script (e.g. `?yt FatToFit` or `?yt 3`)\n" +
-                    "`?ytl` / `?youtubelist` / `?ytlist` - List all YouTube-sourced scripts\n" +
-                    "`?ytsl` - List all YouTube channels currently being tracked\n\n" +
+                    "`?yt <video_url>` - Bypass a single video and save to `?ytl` (Manual list)\n" +
+                    "`?yt set <channel_url> [quantity]` - Track a channel, scan latest videos, save to `?ytsl` (Auto list)\n" +
+                    "`?yt remove <channel_url>` - Remove a channel and its scripts\n" +
+                    "`?yt <name or number>` - Get loadstring for any script\n" +
+                    "`?ytl` - View list of **manually** bypassed scripts\n" +
+                    "`?ytsl` - View list of **auto-scanned** scripts & tracked channels\n\n" +
                     "**Aliases:** `?youtube` works everywhere `?yt` does",
                 inline: false
             },
@@ -3909,45 +3910,108 @@ function extractBypassLinks(text) {
 
 // ---- Helper: fetch YouTube video description and top comments via scraping ----
 async function fetchVideoLinksAndTitle(videoId) {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    let title = '';
+    let allLinks = [];
+
+    // Try YouTube API v3 first if available
+    if (process.env.YOUTUBE_API_KEY) {
+        try {
+            // 1. Fetch Video Metadata (Title & Description)
+            const videoRes = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+                params: {
+                    part: 'snippet',
+                    id: videoId,
+                    key: process.env.YOUTUBE_API_KEY
+                },
+                timeout: 10000
+            });
+
+            const vItem = videoRes.data.items?.[0];
+            if (vItem) {
+                title = vItem.snippet.title;
+                const desc = vItem.snippet.description;
+                allLinks.push(...extractBypassLinks(desc));
+            }
+
+            // 2. Fetch Top Comments (Pinned comments are usually at the top)
+            try {
+                const commentRes = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
+                    params: {
+                        part: 'snippet',
+                        videoId: videoId,
+                        maxResults: 15,
+                        order: 'relevance',
+                        key: process.env.YOUTUBE_API_KEY
+                    },
+                    timeout: 10000
+                });
+
+                if (commentRes.data.items) {
+                    for (const thread of commentRes.data.items) {
+                        const topComment = thread.snippet?.topLevelComment?.snippet;
+                        if (topComment) {
+                            // Extract links from both textOriginal (raw) and textDisplay (rendered html)
+                            allLinks.push(...extractBypassLinks(topComment.textOriginal || ''));
+                            allLinks.push(...extractBypassLinks(topComment.textDisplay || ''));
+                        }
+                    }
+                }
+            } catch (ce) {
+                console.error(`Comment API error for ${videoId}:`, ce.message);
+                // Comments might be disabled, ignore and continue with desc links
+            }
+
+            if (allLinks.length > 0 || title) {
+                return { title, links: [...new Set(allLinks)], videoUrl: url };
+            }
+        } catch (e) {
+            console.error(`YouTube API error for ${videoId}:`, e.message);
+            // Fall back to scraping if API fails
+        }
+    }
+
+    // Fallback: Scrape description from HTML
     try {
-        const url = `https://www.youtube.com/watch?v=${videoId}`;
         const res = await axios.get(url, {
             timeout: 20000,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.9' }
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9' 
+            }
         });
         const html = res.data;
 
-        // Extract title from og:title or ytInitialData
-        let title = '';
-        const ogTitle = html.match(/<meta property="og:title" content="([^"]+)"/);
-        if (ogTitle) title = ogTitle[1].replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+        // Extract title
+        if (!title) {
+            const ogTitle = html.match(/<meta property="og:title" content="([^"]+)"/);
+            if (ogTitle) title = ogTitle[1].replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+        }
 
-        // Extract description from ytInitialData
+        // Extract description from ytInitialData json blobs
         let descLinks = [];
         const descMatch = html.match(/"description":\{"simpleText":"((?:[^"\\]|\\.)*)"\}/);
         if (descMatch) {
             const desc = descMatch[1].replace(/\\n/g, '\n').replace(/\\u0026/g, '&');
-            descLinks = extractBypassLinks(desc);
+            descLinks.push(...extractBypassLinks(desc));
         }
-        // Also check shortDescription
+        
         const shortDesc = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
         if (shortDesc) {
             const sd = shortDesc[1].replace(/\\n/g, '\n').replace(/\\u0026/g, '&');
             descLinks.push(...extractBypassLinks(sd));
         }
 
-        // Deduplicate
-        const allLinks = [...new Set(descLinks)];
-
-        return { title, links: allLinks, videoUrl: url };
+        allLinks.push(...descLinks);
+        return { title, links: [...new Set(allLinks)], videoUrl: url };
     } catch (e) {
-        console.error(`fetchVideoLinksAndTitle error for ${videoId}:`, e.message);
-        return { title: '', links: [], videoUrl: `https://www.youtube.com/watch?v=${videoId}` };
+        console.error(`fetchVideoLinksAndTitle fallback error for ${videoId}:`, e.message);
+        return { title: title || '', links: [...new Set(allLinks)], videoUrl: url };
     }
 }
 
 // ---- Main: scan a channel, process all videos ----
-async function scanYouTubeChannel(channelUrl, message, limit = 30) {
+async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'auto') {
     // Parse channel handle/ID from URL
     let channelHandle = parseYouTubeChannelUrl(channelUrl);
     if (!channelHandle) {
@@ -4070,7 +4134,8 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30) {
             bypassedLink: finalUrl,
             githubUrl,
             obfuscated: !!obfuscatedScript,
-            addedAt: new Date()
+            addedAt: new Date(),
+            source // 'auto' or 'manual'
         });
 
         // Mark as processed
@@ -4089,7 +4154,7 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30) {
     }
 
     // Update persistence checkpoint to most recent video ID
-    if (latestId) {
+    if (latestId && source === 'auto') {
         await ytTrackedCollection.updateOne(
             { channelUrl },
             { $set: { channelUrl, channelHandle, lastProcessedVideoId: latestId, limit, updatedAt: new Date() } },
@@ -4121,20 +4186,37 @@ client.on("messageCreate", async (ytMsg) => {
 
     // ===== ?ytsl =====
     if (isYtScanListCmd) {
-        const configs = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
-        if (!configs.length) return ytMsg.reply('📭 No YouTube channels currently tracked for auto-scanning.');
+        const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).limit(20).toArray();
+        const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
+        
+        let desc = '';
+        
+        if (autoScripts.length > 0) {
+            desc += '**🤖 Recently Auto-Bypassed Scripts:**\n';
+            autoScripts.forEach((s, i) => {
+                desc += `**${i + 1}.** \`${s.scriptName}\` (from \`${s.channelHandle || 'YT'}\`)\n`;
+            });
+            desc += '\n';
+        } else {
+            desc += '📭 No auto-bypassed scripts yet.\n\n';
+        }
 
-        let list = '**📋 Tracked YouTube Channels:**\n\n';
-        configs.forEach((c, i) => {
-            list += `**${i + 1}.** \`${c.channelHandle || c.channelUrl}\` (Latest: \`${c.lastProcessedVideoId || 'None'}\`)\n`;
-        });
-        list += `\n💡 Use \`?yt set <url>\` to scan or update a channel.`;
+        if (tracked.length > 0) {
+            desc += '**📋 Tracked Channels:**\n';
+            tracked.forEach((c, i) => {
+                desc += `• \`${c.channelHandle || c.channelUrl}\` (Latest: \`${c.lastProcessedVideoId || 'None'}\`)\n`;
+            });
+        } else {
+            desc += '📋 No channels currently tracked.';
+        }
+
+        desc += `\n\n💡 Use \`?yt <name or number>\` to fetch a script loadstring.`;
 
         const embed = new EmbedBuilder()
-            .setTitle('📺 YouTube Scan List')
-            .setDescription(list)
+            .setTitle('📺 YouTube Auto-Scan List')
+            .setDescription(desc)
             .setColor('Red')
-            .setFooter({ text: `Total: ${configs.length} channels` })
+            .setFooter({ text: `Auto Scripts: ${autoScripts.length} | Tracked: ${tracked.length}` })
             .setTimestamp();
 
         return ytMsg.reply({ embeds: [embed] });
@@ -4142,20 +4224,20 @@ client.on("messageCreate", async (ytMsg) => {
 
     // ===== ?ytl / ?youtubelist =====
     if (isYtListCmd) {
-        const allScripts = await ytCollection.find().sort({ addedAt: 1 }).toArray();
-        if (!allScripts.length) return ytMsg.reply('📭 No YouTube scripts saved yet.');
+        const manualScripts = await ytCollection.find({ source: 'manual' }).sort({ addedAt: -1 }).toArray();
+        if (!manualScripts.length) return ytMsg.reply('📭 No manual YouTube scripts saved yet. Use `?yt <url>` to bypass and save one.');
 
-        let list = '**📋 YouTube Scripts:**\n\n';
-        allScripts.forEach((s, i) => {
+        let list = '**📋 Manually Bypassed YouTube Scripts:**\n\n';
+        manualScripts.forEach((s, i) => {
             list += `**${i + 1}.** \`${s.scriptName}\`\n`;
         });
         list += `\n💡 Use \`?yt <name or number>\` to get a loadstring.`;
 
         const embed = new EmbedBuilder()
-            .setTitle('🎬 YouTube Script Library')
+            .setTitle('🎬 Manual YouTube Script Library')
             .setDescription(list)
             .setColor('Red')
-            .setFooter({ text: `Total: ${allScripts.length} scripts` })
+            .setFooter({ text: `Total: ${manualScripts.length} scripts` })
             .setTimestamp();
 
         return ytMsg.reply({ embeds: [embed] });
@@ -4253,27 +4335,72 @@ client.on("messageCreate", async (ytMsg) => {
     // ===== ?yt <name or number> OR ?yt <url> [qty] =====
     const query = rawArgs.join(' ').trim();
     if (!query) {
-        return ytMsg.reply('❌ Usage:\n`?yt set <url> [count]` — Scan a channel\n`?yt remove <url>` — Remove a channel\n`?yt <name or number>` — Get a script\n`?ytl` — List all scripts');
+        return ytMsg.reply('❌ Usage:\n`?yt <url>` — Bypass single video (saved to ?ytl)\n`?yt set <url> [count]` — Auto-scan channel (saved to ?ytsl)\n`?yt remove <url>` — Remove a channel\n`?yt <name or number>` — Get a script\n`?ytl` — Manual script list\n`?ytsl` — Auto script & channel list');
     }
 
-    // Check if query is a URL for direct scan
-    if (query.includes('youtube.com') || query.includes('youtu.be')) {
+    // Check if query is a URL for direct manual scan
+    if (query.includes('youtube.com/watch') || query.includes('youtu.be/')) {
+        const videoId = query.includes('watch?v=') ? query.split('v=')[1].split('&')[0] : query.split('/').pop().split('?')[0];
+        
+        if (!videoId) return ytMsg.reply('❌ Invalid YouTube video URL.');
+
+        await ytMsg.reply(`⏳ Starting manual bypass for video \`${videoId}\`...`);
+        
+        // Custom logic for single video to avoid complex scanYouTubeChannel if possible, 
+        // but scanYouTubeChannel already handles everything perfectly. We just pass one ID.
+        // We'll hijack it by passing the video ID instead of channel URL if needed, 
+        // but better to just use a custom mini-scan or pass source='manual'
+        
+        // Actually, scanYouTubeChannel expects a channel URL. Let's make it smarter or handle manually.
+        const videoData = await fetchVideoLinksAndTitle(videoId);
+        if (!videoData.links || videoData.links.length === 0) return ytMsg.reply('❌ No bypassable links found in this video.');
+
+        const finalUrl = await bypassWithFluxusRetry(videoData.links[0]);
+        if (!finalUrl) return ytMsg.reply('❌ Failed to bypass the link.');
+
+        const scriptName = videoData.title.replace(/[^a-zA-Z0-9]/g, '').substring(0, 30) || `ManualYT_${Date.now()}`;
+        const finalScript = generateScriptTemplate(videoData.title, finalUrl, `https://www.youtube.com/watch?v=${videoId}`);
+        
+        const obfuscated = await obfuscateCode(finalScript);
+        const fileName = `${scriptName}_${Date.now()}.lua`;
+        const githubUrl = await createGitHubFile(scriptName, obfuscated || finalScript, GITHUB_REPO);
+
+        await ytCollection.insertOne({
+            videoId,
+            scriptName,
+            fileName,
+            videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
+            videoTitle: videoData.title,
+            originalLink: videoData.links[0],
+            bypassedLink: finalUrl,
+            githubUrl,
+            obfuscated: !!obfuscated,
+            addedAt: new Date(),
+            source: 'manual'
+        });
+
+        return ytMsg.reply(`✅ Manual bypass complete: \`${scriptName}\` saved! View with \`?ytl\`.`);
+    }
+
+    // Check if query is a channel URL (fallback for yt set)
+    if (query.includes('youtube.com/') || query.includes('youtu.be/')) {
         const parts = query.split(' ');
         const url = parts[0];
-        const qty = parseInt(parts[1]) || 5; // Default to 5 for direct scan
+        const qty = parseInt(parts[1]) || 5;
 
-        await ytMsg.reply(`⏳ Starting direct scan of \`${url}\` (top **${qty}** videos)...`);
-        const scanResult = await scanYouTubeChannel(url, ytMsg, qty);
+        await ytMsg.reply(`⏳ Starting manual channel scan of \`${url}\` (top **${qty}** videos, saved as manual)...`);
+        const scanResult = await scanYouTubeChannel(url, ytMsg, qty, 'manual');
 
         if (!scanResult.success) {
             return ytMsg.channel.send(`❌ Scan failed: ${scanResult.reason}`);
         }
 
         const succeeded = scanResult.results.filter(r => r.success);
-        return ytMsg.channel.send(`✅ Direct scan complete. Generated **${succeeded.length}** new scripts.`);
+        return ytMsg.channel.send(`✅ Direct channel scan complete. Generated **${succeeded.length}** new scripts in \`?ytl\`.`);
     }
 
-    const allScripts = await ytCollection.find({ type: { $ne: 'config' } }).sort({ addedAt: 1 }).toArray();
+    // Default search logic
+    const allScripts = await ytCollection.find({ type: { $ne: 'config' } }).sort({ addedAt: -1 }).toArray();
     if (!allScripts.length) return ytMsg.reply('📭 No YouTube scripts saved yet.');
 
     let found = null;
