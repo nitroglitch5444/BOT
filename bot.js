@@ -3766,40 +3766,298 @@ if (cmd === "?repo") {
             return message.channel.send("Failed to clear messages.");
         }
     }
+
+    // ===== YOUTUBE COMMANDS (MERGED) =====
+    const isYtCmd = cmd === '?yt' || cmd === '?youtube';
+    const isYtManualListCmd = ['?ytl', '?ytlist', '?youtubelist'].includes(cmd);
+    const isYtAutoListCmd = ['?ytsl', '?youtubesl'].includes(cmd);
+    const isYtTrackedListCmd = ['?ytul', '?youtubet'].includes(cmd);
+    const isYtStatusCmd = cmd === '?ytsu' || cmd === '?ytstatus';
+    const isYtSearchAutoCmd = cmd === '?yts' || cmd === '?youtubes';
+
+    if (isYtCmd || isYtManualListCmd || isYtAutoListCmd || isYtTrackedListCmd || isYtStatusCmd || isYtSearchAutoCmd) {
+        // Staff check for all yt commands
+        if (!(await isStaff(message.author.id, message.member)) && message.author.id !== OWNER_ID) {
+            return message.reply('❌ Staff only command.');
+        }
+
+        const subArg = args[0]?.toLowerCase();
+
+        // ===== ?ytsl / ?youtubesl (Auto Scripts) =====
+        if (isYtAutoListCmd) {
+            const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).limit(50).toArray();
+            if (!autoScripts.length) return message.reply('📭 No auto-scanned scripts yet. Use `?yt set <url>` to start tracking channels.');
+
+            let listTitle = '**🤖 YouTube Auto-Scan Library:**\n\n';
+            const lines = autoScripts.map((s, i) => `**${i + 1}.** \`${s.scriptName}\``);
+            
+            const embed = new EmbedBuilder()
+                .setTitle('📺 Auto-Scanned Scripts')
+                .setDescription(listTitle + lines.join('\n'))
+                .setColor('Red')
+                .setFooter({ text: `Total: ${autoScripts.length} latest scripts | Use ?yts <number>` })
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+        }
+
+        // ===== ?ytul (Tracked Channels List) =====
+        if (isYtTrackedListCmd) {
+            const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
+            if (!tracked.length) return message.reply('📭 No YouTube channels currently tracked.');
+
+            let desc = '**📋 Tracked YouTube Channels:**\n\n';
+            tracked.forEach((c, i) => {
+                desc += `**${i + 1}.** [${c.channelHandle || c.channelUrl}](https://www.youtube.com/@${c.channelHandle || ''})\n`;
+                desc += `   🔗 \`${c.channelUrl}\`\n\n`;
+            });
+            desc += `💡 Use \`?yt set <url>\` to add more.`;
+
+            const embed = new EmbedBuilder()
+                .setTitle('🎬 Tracked Channels')
+                .setDescription(desc)
+                .setColor('Red')
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+        }
+
+        // ===== ?ytsu (Status) =====
+        if (isYtStatusCmd) {
+            const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
+            if (!tracked.length) return message.reply('📭 No YouTube channels currently tracked for auto-scanning.');
+
+            let list = '**📋 YouTube Auto-Scan Status:**\n\n';
+            tracked.forEach((c, i) => {
+                list += `**${i + 1}.** \`${c.channelHandle || c.channelUrl}\`\n`;
+                list += `   • Latest: \`${c.lastProcessedVideoId || 'None'}\`\n`;
+                list += `   • Limit: \`${c.limit || 30}\`\n`;
+                list += `   • Last Sync: <t:${Math.floor(c.updatedAt.getTime() / 1000)}:R>\n\n`;
+            });
+
+            const embed = new EmbedBuilder()
+                .setTitle('📺 Scan Engine Status')
+                .setDescription(list.substring(0, 4000))
+                .setColor('Red')
+                .setFooter({ text: `Total Tracked: ${tracked.length}` })
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+        }
+
+        // ===== ?ytl (Manual Scripts) =====
+        if (isYtManualListCmd) {
+            const manualScripts = await ytCollection.find({ source: 'manual' }).sort({ addedAt: -1 }).limit(40).toArray();
+            if (!manualScripts.length) return message.reply('📭 No manual YouTube scripts saved yet. Use `?yt <url>` to bypass.');
+
+            let list = '**📋 Manually Bypassed Scripts:**\n\n';
+            manualScripts.forEach((s, i) => {
+                list += `**${i + 1}.** \`${s.scriptName}\`\n`;
+            });
+            list += `\n💡 Use \`?yt <number>\` to get loadstring.`;
+
+            const embed = new EmbedBuilder()
+                .setTitle('🎬 Manual Library')
+                .setDescription(list)
+                .setColor('Red')
+                .setFooter({ text: `Total: ${manualScripts.length}` })
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+        }
+
+        // ===== ?yts <query/number> (Get Auto Script) =====
+        if (isYtSearchAutoCmd) {
+            const query = args.join(' ').trim();
+            if (!query) return message.reply('❌ Usage: `?yts <name or number>`');
+
+            const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).toArray();
+            let found = null;
+
+            if (/^\d+$/.test(query)) {
+                const idx = parseInt(query) - 1;
+                if (idx >= 0 && idx < autoScripts.length) found = autoScripts[idx];
+            } else {
+                const norm = query.replace(/\s+/g, '').toLowerCase();
+                found = autoScripts.find(s => s.scriptName.toLowerCase() === norm)
+                     || autoScripts.find(s => s.scriptName.toLowerCase().includes(norm));
+            }
+
+            if (!found) return message.reply('❌ No auto-scanned script found matching that query.');
+
+            const githubUrl = found.githubUrl;
+            const loadstringCode = `\`\`\`lua\nloadstring(game:HttpGet("${githubUrl}"))()\n\`\`\``;
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`📺 Auto-Scanned: ${found.scriptName}`)
+                .setURL(found.videoUrl)
+                .setColor('Red')
+                .addFields(
+                    { name: '🎥 Video Title', value: found.videoTitle || 'Unknown', inline: false },
+                    { name: '📄 Features', value: found.features || 'N/A', inline: false },
+                    { name: '🎮 Game ID', value: found.gameId || 'N/A', inline: true },
+                    { name: '📅 Added', value: `<t:${Math.floor(found.addedAt.getTime() / 1000)}:R>`, inline: true }
+                )
+                .setTimestamp();
+
+            await message.reply({ embeds: [embed] });
+            return message.channel.send(loadstringCode);
+        }
+
+        // ===== ?yt set <url> [count] =====
+        if (subArg === 'set') {
+            const channelUrl = args[1];
+            const count = parseInt(args[2]) || 30;
+            
+            if (!channelUrl || !channelUrl.includes('youtube.com')) {
+                return message.reply('❌ Usage: `?yt set <channel_url> [count]`');
+            }
+
+            const existing = await ytTrackedCollection.findOne({ channelUrl });
+            if (existing) {
+                await message.reply(`🔄 **Resuming scan** for \`${channelUrl}\` (limit: ${count})...`);
+            } else {
+                await message.reply(`⏳ **Starting initial scan** for \`${channelUrl}\` (limit: ${count})...`);
+            }
+
+            const scanResult = await scanYouTubeChannel(channelUrl, message, count);
+
+            if (!scanResult.success) {
+                return message.channel.send(`❌ **Scan failed:** ${scanResult.reason}`);
+            }
+
+            const succeeded = scanResult.results.filter(r => r?.success);
+            const skippedCount = scanResult.results.filter(r => r?.skipped).length;
+            const failedCount = scanResult.results.filter(r => r?.failed).length;
+
+            const summaryEmbed = new EmbedBuilder()
+                .setTitle('✅ Channel Scan Complete')
+                .setColor('Green')
+                .addFields(
+                    { name: '🟢 Uploaded', value: `${succeeded.length}`, inline: true },
+                    { name: '⏭️ Skipped', value: `${skippedCount}`, inline: true },
+                    { name: '🔴 Failed', value: `${failedCount}`, inline: true }
+                )
+                .setTimestamp();
+
+            if (succeeded.length > 0) {
+                const scriptLines = succeeded.map((r, i) => `**${i + 1}.** \`${r.scriptName}\``).join('\n');
+                summaryEmbed.addFields({ name: 'Uploaded Scripts', value: scriptLines.substring(0, 1024), inline: false });
+            }
+
+            return message.channel.send({ embeds: [summaryEmbed] });
+        }
+
+        // ===== ?yt remove <url> =====
+        if (subArg === 'remove') {
+            if (message.author.id !== OWNER_ID) return message.reply('❌ Only bot owner can remove channels.');
+            const channelUrl = args[1];
+            if (!channelUrl) return message.reply('❌ Usage: `?yt remove <url>`');
+
+            await message.reply(`⏳ Removing channel configs...`);
+            await ytTrackedCollection.deleteOne({ channelUrl });
+            await ytProcessedCollection.deleteMany({ channelUrl });
+            
+            const scripts = await ytCollection.find({ channelUrl }).toArray();
+            for (const s of scripts) {
+                if (s.fileName) {
+                    await deleteGitHubFile(s.fileName, GITHUB_REPO).catch(() => {});
+                    await deleteGitHubFile(s.fileName, GITHUB_BACKUP_REPO).catch(() => {});
+                }
+                await ytCollection.deleteOne({ _id: s._id });
+            }
+
+            return message.reply(`✅ Removed channel and all related script entries.`);
+        }
+
+        // ===== ?yt <query/number> or ?yt <url> =====
+        const query = args.join(' ').trim();
+        if (!query) return message.reply('❌ Usage: `?yt <url>` or `?yt <name/number>`');
+
+        // Direct video/channel URL
+        if (query.includes('youtube.com/') || query.includes('youtu.be/')) {
+            if (query.includes('watch?v=') || query.includes('youtu.be/')) {
+                // Manual single video bypass
+                const videoId = query.includes('watch?v=') ? query.split('v=')[1].split('&')[0] : query.split('/').pop().split('?')[0];
+                if (!videoId) return message.reply('❌ Invalid Video URL.');
+
+                if (message.ytProcessing) return;
+                message.ytProcessing = true;
+
+                const status = await message.reply(`⏳ Bypassing video metadata for \`${videoId}\`...`);
+                const vd = await fetchVideoLinksAndTitle(videoId);
+                
+                if (!vd.links.length) return status.edit('❌ No bypassable links found.');
+
+                const { name: rawName, features } = parseVideoTitle(vd.title);
+                let scriptName = rawName;
+                let counter = 1;
+                while (await ytCollection.findOne({ scriptName })) { scriptName = `${rawName}${counter++}`; }
+
+                await status.edit(`🔄 Bypassing link (\`${vd.links[0]}\`)...`);
+                const finalUrl = await recursiveBypassWithIzen(vd.links[0], message);
+                if (!finalUrl || finalUrl.error) return status.edit(`❌ Bypass failed.`);
+
+                const bypassResult = typeof finalUrl === 'string' ? finalUrl : finalUrl.result;
+                const baseScript = generateKeySystemScript(bypassResult, videoId);
+                const obfuscated = await obfuscateCode(baseScript);
+                const githubUrl = await createGitHubFile(scriptName, obfuscated || baseScript, GITHUB_REPO);
+
+                await ytCollection.insertOne({
+                    videoId, scriptName, fileName: `${scriptName}.lua`, videoUrl: vd.videoUrl, videoTitle: vd.title,
+                    githubUrl, gameId: vd.gameId || 'N/A', features: features || 'N/A', addedAt: new Date(), source: 'manual'
+                });
+
+                const log = `\`\`\`lua\nloadstring(game:HttpGet("${githubUrl}"))()\n\`\`\`\nFeatures: ${features || 'N/A'}\nGameID: ${vd.gameId || 'N/A'}`;
+                return status.edit(`✅ **Manual Bypass Complete!**\n\n${log}`);
+            } else {
+                // Channel URL scan trigger
+                return message.reply('💡 Use `?yt set <url>` to track a channel.');
+            }
+        }
+
+        // Search logic
+        const all = await ytCollection.find().sort({ addedAt: -1 }).toArray();
+        let found = null;
+        if (/^\d+$/.test(query)) {
+            const idx = parseInt(query) - 1;
+            if (idx >= 0 && idx < all.length) found = all[idx];
+        } else {
+            const norm = query.replace(/\s+/g, '').toLowerCase();
+            found = all.find(s => s.scriptName.toLowerCase() === norm)
+                 || all.find(s => s.scriptName.toLowerCase().includes(norm));
+        }
+
+        if (!found) return message.reply(`❌ Not found. Use \`?ytl\` or \`?ytsl\`.`);
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🎬 ${found.scriptName}`)
+            .setDescription(`\`\`\`lua\nloadstring(game:HttpGet("${found.githubUrl}"))()\n\`\`\``)
+            .addFields(
+                { name: '📺 Video', value: found.videoUrl, inline: false },
+                { name: '📄 Features', value: found.features || 'N/A', inline: false }
+            )
+            .setColor('Red')
+            .setTimestamp();
+
+        return message.reply({ embeds: [embed] });
+    }
+
 });
 
 // ===== YOUTUBE SCRIPT COMMANDS =====
 
 // ---- Helper: extract YouTube channel ID or handle from a URL ----
 function parseYouTubeChannelUrl(url) {
-    // Accepts: /channel/UCxxx  /c/name  /@handle  /user/name
+    if (!url) return null;
+    // Accepts: youtube.com/channel/UCxxx  youtube.com/c/name  youtube.com/@handle  youtube.com/user/name
     const m = url.match(/youtube\.com\/(?:channel\/|c\/|@|user\/)([^\/?&\s]+)/i);
-    return m ? m[1] : null;
-}
-
-// ---- Helper: clean a video title into a CamelCase script name ----
-// Strips everything inside brackets/emojis, cuts at "Script", CamelCases rest
-function titleToScriptName(title) {
-    // Remove emoji sequences and bracketed prefixes like [🥦INF] or ⚔️
-    let cleaned = title.replace(/\[.*?\]/g, '').replace(/[\u{1F300}-\u{1FFFF}]/gu, '').replace(/[^\x00-\x7F]/g, '').trim();
-
-    // Find "Script" and take everything BEFORE it
-    const scriptIdx = cleaned.search(/Script/i);
-    if (scriptIdx !== -1) {
-        cleaned = cleaned.substring(0, scriptIdx).trim();
-    }
-
-    // Remove leading dashes/pipes/special chars left over
-    cleaned = cleaned.replace(/^[\s\-–|]+/, '').trim();
-
-    // CamelCase: split on spaces/dashes, capitalize each word, join
-    const name = cleaned
-        .split(/[\s\-–_]+/)
-        .filter(w => /[a-zA-Z0-9]/.test(w))
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-        .join('');
-
-    return name || null;
+    if (m) return m[1];
+    
+    // Handle @username directly
+    if (url.startsWith('@')) return url.substring(1);
+    
+    return null;
 }
 
 const activeScans = new Set();
@@ -3929,23 +4187,32 @@ function extractGameId(text) {
 
 // ---- Helper: parse video title into name and features ----
 function parseVideoTitle(title) {
-    // Example: "🦅 +1 Speed Wings Escape Script - FAST WINS, TRAIN, REBIRTH"
-    // Remove symbols/emojis
-    let clean = title.replace(/[\u{1F300}-\u{1FFFF}]/gu, '').replace(/[^\x00-\x7F]/g, '').trim(); 
+    if (!title) return { name: "YouTubeScript", features: "N/A" };
     
-    // Split by "Script" keyword
-    const parts = clean.split(/Script/i);
-    let namePart = parts[0] || "";
-    
-    // Remove everything that isn't a letter from the name
-    let name = namePart.replace(/[^a-zA-Z]/g, '').trim();
-    if (!name || name.length < 2) name = "YouTubeScript";
+    // 1. Remove brackets [Like This] and emoji
+    let cleaned = title.replace(/\[.*?\]/g, '')
+                       .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
+                       .replace(/[^\x00-\x7F]/g, '')
+                       .trim();
 
-    // Features: everything after the first "Script -" or "Script"
-    let featurePart = clean.substring(clean.toLowerCase().indexOf('script') + 6).replace(/^[ \-]+/, '').trim();
+    // 2. Find "Script" and split
+    const scriptIdx = cleaned.search(/Script/i);
+    let namePart = scriptIdx !== -1 ? cleaned.substring(0, scriptIdx).trim() : cleaned;
+    let featurePart = scriptIdx !== -1 ? cleaned.substring(scriptIdx + 6).replace(/^[ \-]+/, '').trim() : "N/A";
+
+    // 3. Name: Only letters (remove numbers, symbols, spaces)
+    let name = namePart.replace(/[^a-zA-Z]/g, '').trim();
     
-    return { name, features: featurePart };
+    // Capitalize first letter if not empty
+    if (name.length > 0) {
+        name = name.charAt(0).toUpperCase() + name.slice(1);
+    } else {
+        name = "YouTubeScript";
+    }
+
+    return { name, features: featurePart || "N/A" };
 }
+
 
 // ---- Helper: fetch YouTube video metadata, top comments (20) & gameId ----
 async function fetchVideoLinksAndTitle(videoId) {
@@ -4074,7 +4341,7 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
     await message.channel.send(`🔍 Fetching latest videos from \`${channelHandle}\`...`);
 
     const videos = await fetchYouTubeVideoIds(channelHandle);
-    if (!videos.length) return { success: false, reason: 'Could not fetch videos. Check the channel URL or try again later.' };
+    if (!videos.length) return { success: false, reason: 'Could not fetch videos. Please ensure the channel is public and contains videos.' };
 
     // PERSISTENCE: Get last processed video ID
     const config = await ytTrackedCollection.findOne({ channelUrl });
@@ -4230,371 +4497,6 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
         activeScans.delete(channelUrl);
     }
 }
-
-// ===== YT / YOUTUBE COMMAND HANDLER =====
-
-client.on("messageCreate", async (ytMsg) => {
-    if (ytMsg.author.bot) return;
-
-    const rawArgs = ytMsg.content.trim().split(/ +/g);
-    const rawCmd = rawArgs.shift()?.toLowerCase();
-
-    const isYtCmd = rawCmd === '?yt' || rawCmd === '?youtube';
-    const isYtManualListCmd = ['?ytl', '?ytlist', '?youtubelist'].includes(rawCmd);
-    const isYtAutoListCmd = ['?ytsl', '?youtubesl'].includes(rawCmd);
-    const isYtTrackedListCmd = ['?ytul', '?youtubet'].includes(rawCmd);
-    const isYtStatusCmd = rawCmd === '?ytsu' || rawCmd === '?ytstatus';
-    const isYtSearchAutoCmd = rawCmd === '?yts' || rawCmd === '?youtubes';
-
-    if (!isYtCmd && !isYtManualListCmd && !isYtAutoListCmd && !isYtTrackedListCmd && !isYtStatusCmd && !isYtSearchAutoCmd) return;
-
-    // Staff check for all yt commands
-    if (!(await isStaff(ytMsg.author.id, ytMsg.member)) && ytMsg.author.id !== OWNER_ID) {
-        return ytMsg.reply('❌ Staff only command.');
-    }
-
-    // ===== ?ytsl / ?youtubesl (Auto Scripts) =====
-    if (isYtAutoListCmd) {
-        const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).limit(40).toArray();
-        if (!autoScripts.length) return ytMsg.reply('📭 No auto-scanned scripts yet. Use `?yt set <url>` to start tracking channels.');
-
-        let listTitle = '**🤖 Auto-Scanned YouTube Scripts:**\n\n';
-        const lines = autoScripts.map((s, i) => `**${i + 1}.** \`${s.scriptName}\``);
-        
-        const embed = new EmbedBuilder()
-            .setTitle('📺 YouTube Auto-Scan Library')
-            .setDescription(listTitle + lines.join('\n'))
-            .setColor('Red')
-            .setFooter({ text: `Latest ${autoScripts.length} scripts | Use ?yts <number>` })
-            .setTimestamp();
-
-        return ytMsg.reply({ embeds: [embed] });
-    }
-
-    // ===== ?ytul (Tracked Channels List) =====
-    if (isYtTrackedListCmd) {
-        const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
-        if (!tracked.length) return ytMsg.reply('📭 No YouTube channels currently tracked.');
-
-        let desc = '**📋 Tracked YouTube Channels:**\n\n';
-        tracked.forEach((c, i) => {
-            desc += `**${i + 1}.** [${c.channelHandle || c.channelUrl}](https://www.youtube.com/@${c.channelHandle || ''})\n`;
-            desc += `   🔗 URL: \`${c.channelUrl}\`\n\n`;
-        });
-        desc += `💡 Use \`?yt set <url>\` to add more.`;
-
-        const embed = new EmbedBuilder()
-            .setTitle('🎬 Tracked Channel URLs')
-            .setDescription(desc)
-            .setColor('Red')
-            .setTimestamp();
-
-        return ytMsg.reply({ embeds: [embed] });
-    }
-
-    // ===== ?ytsu =====
-    if (isYtStatusCmd) {
-        const tracked = await ytTrackedCollection.find().sort({ updatedAt: -1 }).toArray();
-        if (!tracked.length) return ytMsg.reply('📭 No YouTube channels currently tracked for auto-scanning.');
-
-        let list = '**📋 YouTube Auto-Scan Channels:**\n\n';
-        tracked.forEach((c, i) => {
-            list += `**${i + 1}.** \`${c.channelHandle || c.channelUrl}\`\n`;
-            list += `   • Latest Video: \`${c.lastProcessedVideoId || 'None'}\`\n`;
-            list += `   • Scan Limit: \`${c.limit || 30}\`\n`;
-            list += `   • Updated: <t:${Math.floor(c.updatedAt.getTime() / 1000)}:R>\n\n`;
-        });
-
-        const embed = new EmbedBuilder()
-            .setTitle('📺 YouTube Auto-Scan Status')
-            .setDescription(list)
-            .setColor('Red')
-            .setFooter({ text: `Total: ${tracked.length} tracked channels` })
-            .setTimestamp();
-
-        return ytMsg.reply({ embeds: [embed] });
-    }
-
-    // ===== ?ytl / ?youtubelist (Manual Scripts) =====
-    if (isYtManualListCmd) {
-        const manualScripts = await ytCollection.find({ source: 'manual' }).sort({ addedAt: -1 }).limit(30).toArray();
-        if (!manualScripts.length) return ytMsg.reply('📭 No manual YouTube scripts saved yet. Use `?yt <url>` to bypass and save one.');
-
-        let list = '**📋 Manually Bypassed YouTube Scripts:**\n\n';
-        manualScripts.forEach((s, i) => {
-            list += `**${i + 1}.** \`${s.scriptName}\`\n`;
-        });
-        list += `\n💡 Use \`?yt <name or number>\` to get a loadstring.`;
-
-        const embed = new EmbedBuilder()
-            .setTitle('🎬 Manual YouTube Script Library')
-            .setDescription(list)
-            .setColor('Red')
-            .setFooter({ text: `Total: ${manualScripts.length} scripts` })
-            .setTimestamp();
-
-        return ytMsg.reply({ embeds: [embed] });
-    }
-
-    // ===== ?yts <query> (Search Auto Scripts) =====
-    if (isYtSearchAutoCmd) {
-        const query = rawArgs.join(' ').trim();
-        if (!query) return ytMsg.reply('❌ Usage: `?yts <name or number>`');
-
-        const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).toArray();
-        let found = null;
-
-        if (/^\d+$/.test(query)) {
-            const idx = parseInt(query) - 1;
-            if (idx >= 0 && idx < autoScripts.length) found = autoScripts[idx];
-        }
-
-        if (!found) {
-            const norm = query.replace(/\s+/g, '').toLowerCase();
-            found = autoScripts.find(s => s.scriptName.toLowerCase() === norm)
-                 || autoScripts.find(s => s.scriptName.toLowerCase().includes(norm));
-        }
-
-        if (!found) return ytMsg.reply('❌ No auto-scanned script found matching that query.');
-
-        const githubUrl = found.githubUrl;
-        const loadstringCode = `\`\`\`lua\nloadstring(game:HttpGet("${githubUrl}"))()\n\`\`\``;
-        
-        const embed = new EmbedBuilder()
-            .setTitle(`📺 Auto-Scanned: ${found.scriptName}`)
-            .setURL(found.videoUrl)
-            .setColor('Red')
-            .addFields(
-                { name: '🎥 Video Title', value: found.videoTitle || 'Unknown', inline: false },
-                { name: '📄 Features', value: found.features || 'N/A', inline: false },
-                { name: '🎮 Game ID', value: found.gameId || 'N/A', inline: true },
-                { name: '📅 Added', value: `<t:${Math.floor(found.addedAt.getTime() / 1000)}:R>`, inline: true }
-            )
-            .setTimestamp();
-
-        await ytMsg.reply({ embeds: [embed] });
-        return ytMsg.channel.send(loadstringCode);
-    }
-
-    const subArg = rawArgs[0]?.toLowerCase();
-
-    // ===== ?yt set <url> [count] =====
-    if (subArg === 'set') {
-        const channelUrl = rawArgs[1];
-        const count = parseInt(rawArgs[2]) || 30;
-        
-        if (!channelUrl || !channelUrl.includes('youtube.com')) {
-            return ytMsg.reply('❌ Usage: `?yt set <youtube_channel_url> [count]`\nExample: `?yt set https://www.youtube.com/@ChannelName 10`');
-        }
-
-        // Check if already being tracked
-        const existing = await ytTrackedCollection.findOne({ channelUrl });
-        if (existing) {
-            await ytMsg.reply(`🔄 **Resuming scan** for \`${channelUrl}\` (processing latest **${count}** videos)...`);
-        } else {
-            await ytMsg.reply(`⏳ Starting initial scan of \`${channelUrl}\` (top **${count}** videos)...`);
-        }
-
-        const scanResult = await scanYouTubeChannel(channelUrl, ytMsg, count);
-
-        if (!scanResult.success) {
-            return ytMsg.channel.send(`❌ Scan failed: ${scanResult.reason}`);
-        }
-
-        const { results } = scanResult;
-        const succeeded = results.filter(r => r.success);
-        const skipped = results.filter(r => r.skipped);
-        const failed = results.filter(r => r.failed);
-
-        const summaryEmbed = new EmbedBuilder()
-            .setTitle('✅ YouTube Channel Scan Complete')
-            .setColor('Green')
-            .addFields(
-                { name: '🟢 Scripts Uploaded', value: `${succeeded.length}`, inline: true },
-                { name: '⏭️ Skipped (exists)', value: `${skipped.length}`, inline: true },
-                { name: '🔴 Failed', value: `${failed.length}`, inline: true }
-            )
-            .setTimestamp();
-
-        if (succeeded.length > 0) {
-            const scriptLines = succeeded.map(r => `• \`${r.scriptName}\``).join('\n');
-            summaryEmbed.addFields({ name: '📦 Uploaded Scripts', value: scriptLines.substring(0, 1000), inline: false });
-        }
-
-        return ytMsg.channel.send({ embeds: [summaryEmbed] });
-    }
-
-    // ===== ?yt remove <url> =====
-    if (subArg === 'remove') {
-        if (ytMsg.author.id !== OWNER_ID) {
-            return ytMsg.reply('❌ Only the bot owner can remove YouTube channels.');
-        }
-
-        const channelUrl = rawArgs[1];
-        if (!channelUrl) return ytMsg.reply('❌ Usage: `?yt remove <youtube_channel_url>`');
-
-        await ytMsg.reply(`⏳ Removing channel config and processing history...`);
-
-        // Remove from tracked and scripts
-        await ytTrackedCollection.deleteOne({ channelUrl });
-        const scriptEntries = await ytCollection.find({ channelUrl }).toArray();
-        
-        let removed = 0, failed = 0;
-        for (const e of scriptEntries) {
-            if (e.fileName) {
-                await deleteGitHubFile(e.fileName, GITHUB_REPO);
-                await deleteGitHubFile(e.fileName, GITHUB_BACKUP_REPO).catch(() => {});
-                removed++;
-            }
-            await ytCollection.deleteOne({ _id: e._id });
-        }
-        
-        // Also clear process history for this channel
-        await ytProcessedCollection.deleteMany({ channelUrl });
-
-        const embed = new EmbedBuilder()
-            .setTitle('🗑️ YouTube Channel Removed')
-            .setColor('Orange')
-            .addFields(
-                { name: 'Channel', value: channelUrl, inline: false },
-                { name: '✅ Removed', value: `${removed}`, inline: true },
-                { name: '❌ Failed', value: `${failed}`, inline: true }
-            )
-            .setTimestamp();
-
-        return ytMsg.channel.send({ embeds: [embed] });
-    }
-
-    // ===== ?yt <name or number> OR ?yt <url> [qty] =====
-    const query = rawArgs.join(' ').trim();
-    if (!query) {
-        return ytMsg.reply('❌ Usage:\n`?yt <url>` — Bypass single video (saved to ?ytl)\n`?yt set <url> [count]` — Auto-scan channel (saved to ?ytsl)\n`?yt remove <url>` — Remove a channel\n`?yt <name or number>` — Get a script\n`?ytl` — Manual script list\n`?ytsl` — Auto script & channel list');
-    }
-
-    // Check if query is a URL for direct manual scan
-    if (query.includes('youtube.com/watch') || query.includes('youtu.be/')) {
-        const videoId = query.includes('watch?v=') ? query.split('v=')[1].split('&')[0] : query.split('/').pop().split('?')[0];
-        
-        if (!videoId) return ytMsg.reply('❌ Invalid YouTube video URL.');
-
-        // Prevent double processing if multiple handlers exist
-        if (ytMsg.ytProcessing) return;
-        ytMsg.ytProcessing = true;
-
-        const statusMsg = await ytMsg.reply(`⏳ **[Step 1/3]** Fetching metadata for video \`${videoId}\`...`);
-        
-        const videoData = await fetchVideoLinksAndTitle(videoId);
-        if (!videoData.links || videoData.links.length === 0) {
-            return statusMsg.edit('❌ No bypassable links found in this video.');
-        }
-
-        const { name: rawName, features } = parseVideoTitle(videoData.title);
-        let scriptName = rawName;
-        let counter = 1;
-        while (await ytCollection.findOne({ scriptName })) {
-            scriptName = `${rawName}${counter}`;
-            counter++;
-        }
-
-        await statusMsg.edit(`🔄 **[Step 2/3]** Bypassing link (\`${videoData.links[0]}\`)...`);
-        const finalUrl = await recursiveBypassWithIzen(videoData.links[0], ytMsg);
-        
-        if (!finalUrl || finalUrl.error) {
-            return statusMsg.edit(`❌ Bypass failed: ${finalUrl?.message || 'Unknown error'}`);
-        }
-
-        const bypassResult = typeof finalUrl === 'string' ? finalUrl : finalUrl.result;
-
-        await statusMsg.edit(`🛡️ **[Step 3/3]** Obfuscating and saving script \`${scriptName}\`...`);
-        const baseScript = generateKeySystemScript(bypassResult, videoId);
-        const obfuscated = await obfuscateCode(baseScript);
-        
-        const githubUrl = await createGitHubFile(scriptName, obfuscated || baseScript, GITHUB_REPO);
-        if (!githubUrl) return statusMsg.edit('❌ GitHub upload failed.');
-
-        const manualData = {
-            videoId,
-            scriptName,
-            fileName: `${scriptName}.lua`,
-            videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
-            videoTitle: videoData.title,
-            originalLink: videoData.links[0],
-            bypassedLink: bypassResult,
-            githubUrl,
-            obfuscated: !!obfuscated,
-            gameId: videoData.gameId || 'N/A',
-            features: features || 'N/A',
-            addedAt: new Date(),
-            source: 'manual'
-        };
-
-        await ytCollection.insertOne(manualData);
-
-        const loadstringCode = `loadstring(game:HttpGet("${githubUrl}"))()`;
-        const finalLog = `${loadstringCode}\n${features || 'No Features Found'}\n${videoData.gameId || 'No Game ID Found'}`;
-
-        await statusMsg.edit(`✅ **Bypass Complete!**\n\n${finalLog}`);
-        return;
-    }
-
-    // Check if query is a channel URL (fallback for yt set)
-    if (query.includes('youtube.com/') || query.includes('youtu.be/')) {
-        const parts = query.split(' ');
-        const url = parts[0];
-        const qty = parseInt(parts[1]) || 5;
-
-        await ytMsg.reply(`⏳ Starting manual channel scan of \`${url}\` (top **${qty}** videos, saved as manual)...`);
-        const scanResult = await scanYouTubeChannel(url, ytMsg, qty, 'manual');
-
-        if (!scanResult.success) {
-            return ytMsg.channel.send(`❌ Scan failed: ${scanResult.reason}`);
-        }
-
-        const succeeded = scanResult.results.filter(r => r.success);
-        return ytMsg.channel.send(`✅ Direct channel scan complete. Generated **${succeeded.length}** new scripts in \`?ytl\`.`);
-    }
-
-    // Default search logic
-    const allScripts = await ytCollection.find({ type: { $ne: 'config' } }).sort({ addedAt: -1 }).toArray();
-    if (!allScripts.length) return ytMsg.reply('📭 No YouTube scripts saved yet.');
-
-    let found = null;
-
-    // Check if numeric
-    if (/^\d+$/.test(query)) {
-        const idx = parseInt(query) - 1;
-        if (idx >= 0 && idx < allScripts.length) found = allScripts[idx];
-    }
-
-    // Search by name — normalise both sides (remove spaces, lowercase)
-    if (!found) {
-        const normalised = query.replace(/\s+/g, '').toLowerCase();
-        found = allScripts.find(s => s.scriptName.toLowerCase() === normalised)
-            || allScripts.find(s => s.scriptName.toLowerCase().includes(normalised))
-            || allScripts.find(s => normalised.includes(s.scriptName.toLowerCase()));
-    }
-
-    if (!found) {
-        return ytMsg.reply(`❌ No script found matching \`${query}\`.\nUse \`?ytl\` to see all available scripts.`);
-    }
-
-    const loadstringCode = `\`\`\`lua\nloadstring(game:HttpGet("${found.githubUrl}"))()` + '\n```';
-
-    const embed = new EmbedBuilder()
-        .setTitle(`🎬 ${found.scriptName}`)
-        .setColor('Red')
-        .addFields(
-            { name: '📝 Script Name', value: `\`${found.scriptName}\``, inline: false },
-            { name: '📺 Source Video', value: found.videoUrl, inline: false },
-            { name: '🎞️ Video Title', value: found.videoTitle || 'Unknown', inline: false },
-            { name: '🟢 Status', value: found.obfuscated ? '✅ Obfuscated' : '⚠️ Not obfuscated', inline: true },
-            { name: '📦 GitHub URL', value: `\`${found.githubUrl}\``, inline: false }
-        )
-        .setTimestamp();
-
-    await ytMsg.reply({ embeds: [embed] });
-    return ytMsg.channel.send(loadstringCode);
-});
 
 // ===== YOUTUBE BACKGROUND SCRAPER LOOP =====
 
