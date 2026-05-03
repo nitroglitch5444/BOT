@@ -106,9 +106,12 @@ if (req.method === 'POST' && req.url === '/api/feedback') {
     console.log(`Keep-alive server running on port ${process.env.PORT || 3000}`);
 });
 
-// Self-ping every 5 minutes
+// Self-ping every 5 minutes to keep Render alive
 setInterval(() => {
-    https.get('https://bot-lyny.onrender.com', () => {
+    const url = process.env.RENDER_EXTERNAL_URL;
+    if (!url) return;
+    
+    https.get(url, () => {
         console.log('Self-ping successful');
     }).on('error', err => {
         console.log('Self-ping failed:', err.message);
@@ -3766,6 +3769,95 @@ if (cmd === "?repo") {
         }
     }
 
+    // ===== ?yts upload <id or name> =====
+    if (cmd === '?yts' && args[0]?.toLowerCase() === 'upload') {
+        if (!(await isStaff(message.author.id, message.member)) && message.author.id !== OWNER_ID) {
+            return message.reply('❌ Staff only command.');
+        }
+
+        const query = args.slice(1).join(' ').trim();
+        const logChannelId = process.env.YT_LOG_CHANNEL_ID;
+        if (!logChannelId) return message.reply('❌ `YT_LOG_CHANNEL_ID` not configured.');
+        const logChannel = client.channels.cache.get(logChannelId);
+        if (!logChannel) return message.reply('❌ Log channel not found.');
+
+        let scriptsToUpload = [];
+
+        if (!query) {
+            // Upload everything in ?ytsl (source: auto)
+            scriptsToUpload = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).toArray();
+        } else {
+            // Find specific script
+            const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).toArray();
+            let found = null;
+            if (/^\d+$/.test(query)) {
+                const idx = parseInt(query) - 1;
+                if (idx >= 0 && idx < autoScripts.length) found = autoScripts[idx];
+            } else {
+                const norm = query.replace(/\s+/g, '').toLowerCase();
+                found = autoScripts.find(s => s.scriptName.toLowerCase() === norm)
+                     || autoScripts.find(s => s.scriptName.toLowerCase().includes(norm));
+            }
+            if (found) scriptsToUpload = [found];
+            else return message.reply('❌ Script not found.');
+        }
+
+        if (scriptsToUpload.length === 0) return message.reply('📭 No scripts to upload.');
+
+        await message.reply(`⏳ Uploading ${scriptsToUpload.length} scripts to logs...`);
+
+        for (const s of scriptsToUpload) {
+            const date = s.addedAt || new Date();
+            const day = String(date.getDate()).padStart(2, '0');
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const year = date.getFullYear();
+            const time = date.toTimeString().split(' ')[0].substring(0, 5);
+
+            const log = `PRIME X BOT\nAPP\n — ${day}-${month}-${year} ${time}\nloadstring(game:HttpGet("${s.githubUrl}"))()\n${s.features || 'N/A'}\n${s.gameId || 'N/A'}`;
+            await logChannel.send(log);
+            // Small delay to prevent rate limit
+            await new Promise(r => setTimeout(r, 1000));
+        }
+
+        return message.channel.send(`✅ Successfully uploaded ${scriptsToUpload.length} scripts.`);
+    }
+
+    if (cmd === "?clearforyt") {
+        if (!(await isStaff(message.author.id, message.member)) && message.author.id !== OWNER_ID) {
+            return message.reply('❌ Staff only command.');
+        }
+
+        const logChannelId = process.env.YT_LOG_CHANNEL_ID;
+        if (!logChannelId) return message.reply('❌ `YT_LOG_CHANNEL_ID` not configured.');
+        const logChannel = client.channels.cache.get(logChannelId);
+        if (!logChannel) return message.reply('❌ Log channel not found.');
+
+        await message.reply(`⏳ Cleaning channel \`${logChannel.name}\`...`);
+
+        try {
+            let deletedCount = 0;
+            const messages = await logChannel.messages.fetch({ limit: 100 });
+            
+            for (const msg of messages.values()) {
+                // Check if message follows the format
+                const hasBotHeader = msg.content.includes("PRIME X BOT") && msg.content.includes("APP");
+                const hasLoadstring = msg.content.includes("loadstring(game:HttpGet(");
+                
+                if (!hasBotHeader || !hasLoadstring) {
+                    await msg.delete().catch(() => {});
+                    deletedCount++;
+                    // Prevent rate limits
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            }
+            
+            return message.channel.send(`✅ Cleaned up ${deletedCount} non-matching messages from <#${logChannelId}>.`);
+        } catch (error) {
+            console.error("ClearForYt error:", error);
+            return message.channel.send("❌ Failed to clear messages.");
+        }
+    }
+
     // ===== YOUTUBE COMMANDS (MERGED) =====
     const isYtCmd = cmd === '?yt' || cmd === '?youtube';
     const isYtManualListCmd = ['?ytl', '?ytlist', '?youtubelist'].includes(cmd);
@@ -4009,8 +4101,19 @@ if (cmd === "?repo") {
                     githubUrl, gameId: vd.gameId || 'N/A', features: features || 'N/A', addedAt: new Date(), source: 'manual'
                 });
 
-                const log = `loadstring(game:HttpGet("${githubUrl}"))()\n${features || 'N/A'}\n${vd.gameId || 'N/A'}`;
-                return status.edit(`✅ **Manual Bypass Complete!**\n\n${log}`);
+                const date = new Date();
+                const day = String(date.getDate()).padStart(2, '0');
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const year = date.getFullYear();
+                const time = date.toTimeString().split(' ')[0].substring(0, 5);
+
+                const finalLog = `PRIME X BOT\nAPP\n — ${day}-${month}-${year} ${time}\nloadstring(game:HttpGet("${githubUrl}"))()\n${features || 'N/A'}\n${vd.gameId || 'N/A'}`;
+                
+                const logChannel = client.channels.cache.get(process.env.YT_LOG_CHANNEL_ID);
+                if (logChannel) await logChannel.send(finalLog);
+
+                const statusMsgText = `✅ **Manual Bypass Complete!**\n\n${finalLog}`;
+                return status.edit(statusMsgText.substring(0, 2000));
             } else if (query.includes('/@') || query.includes('/channel/') || query.includes('/c/') || query.includes('/user/')) {
                 // Channel URL scan trigger - Make it automatic!
                 await message.reply(`🔄 **Channel URL detected.** Running a one-time scan (latest 5 videos)...`);
@@ -4375,9 +4478,15 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
                 await ytCollection.insertOne(entry);
                 await ytProcessedCollection.insertOne({ videoId: video.id, channelUrl, processedAt: new Date() });
 
-                // Success Output 3 lines
+                // Success Output in requested format
                 const loadstring = `loadstring(game:HttpGet("${githubUrl}"))()`;
-                const finalLog = `${loadstring}\n${features || 'N/A'}\n${vd.gameId || 'N/A'}`;
+                const date = new Date();
+                const day = String(date.getDate()).padStart(2, '0');
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const year = date.getFullYear();
+                const time = date.toTimeString().split(' ')[0].substring(0, 5);
+                
+                const finalLog = `PRIME X BOT\nAPP\n — ${day}-${month}-${year} ${time}\n${loadstring}\n${features || 'N/A'}\n${vd.gameId || 'N/A'}`;
 
                 if (logChannel) {
                     await logChannel.send(finalLog);
