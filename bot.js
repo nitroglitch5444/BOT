@@ -2358,11 +2358,13 @@ if (cmd === "?modhelp" || cmd === "?mp") {
                     "`?ytl` - View list of **manually** bypassed scripts\n" +
                     "`?ytsl` - View list of **auto-scanned** scripts\n" +
                     "`?ytul` - View list of tracked channel URLs\n" +
-                    "`?ytsu` - View auto-scan status\n\n" +
+                    "`?ytsu` - View auto-scan status\n" +
+                    "`?yts upload <id/name>` - Upload script(s) to log channel in format\n" +
+                    "`?yts delete <id/name>` - Delete script(s) from auto-scan & GitHub (Owner only)\n" +
+                    "`?clearforyt` - Clear log channel of non-matching formats\n\n" +
                     "**Aliases:** `?youtube` works everywhere `?yt` does",
                 inline: false
-            },
-            {
+            },            {
                 name: "**Sairo Key System** (Staff Only)",
                 value:
                     "`?setdevid @user` - Assign a DevId to a user (Owner only)\n" +
@@ -3820,6 +3822,57 @@ if (cmd === "?repo") {
         }
 
         return message.channel.send(`✅ Successfully uploaded ${scriptsToUpload.length} scripts.`);
+    }
+
+    // ===== ?yts delete <number or name> =====
+    if (cmd === '?yts' && args[0]?.toLowerCase() === 'delete') {
+        if (message.author.id !== OWNER_ID) {
+            return message.reply('❌ Owner only command.');
+        }
+
+        const query = args.slice(1).join(' ').trim();
+        let scriptsToDelete = [];
+
+        if (!query) {
+            // Delete everything in ?ytsl (source: auto)
+            scriptsToDelete = await ytCollection.find({ source: 'auto' }).toArray();
+        } else {
+            const autoScripts = await ytCollection.find({ source: 'auto' }).sort({ addedAt: -1 }).toArray();
+            let found = null;
+            if (/^\d+$/.test(query)) {
+                const idx = parseInt(query) - 1;
+                if (idx >= 0 && idx < autoScripts.length) found = autoScripts[idx];
+            } else {
+                const norm = query.replace(/\s+/g, '').toLowerCase();
+                found = autoScripts.find(s => s.scriptName.toLowerCase() === norm)
+                     || autoScripts.find(s => s.scriptName.toLowerCase().includes(norm));
+            }
+            if (found) scriptsToDelete = [found];
+            else return message.reply('❌ Script not found.');
+        }
+
+        if (scriptsToDelete.length === 0) return message.reply('📭 No scripts to delete.');
+
+        const confirmMsg = await message.reply(`⚠️ **Are you sure you want to delete ${scriptsToDelete.length === 1 ? `script \`${scriptsToDelete[0].scriptName}\`` : 'ALL auto-scanned scripts'}?**\n*This will also delete the files from GitHub.* (Reply with \`yes\` to confirm)`);
+        
+        const filter = m => m.author.id === message.author.id && m.content.toLowerCase() === 'yes';
+        const collected = await message.channel.awaitMessages({ filter, max: 1, time: 15000 });
+
+        if (!collected.size) return confirmMsg.edit('❌ Deletion cancelled.');
+
+        await message.reply(`🗑️ Deleting ${scriptsToDelete.length} scripts...`);
+
+        let deleted = 0;
+        for (const s of scriptsToDelete) {
+            if (s.fileName) {
+                await deleteGitHubFile(s.fileName, GITHUB_REPO).catch(() => {});
+                await deleteGitHubFile(s.fileName, GITHUB_BACKUP_REPO).catch(() => {});
+            }
+            await ytCollection.deleteOne({ _id: s._id });
+            deleted++;
+        }
+
+        return message.channel.send(`✅ Successfully deleted ${deleted} scripts from database and GitHub.`);
     }
 
     if (cmd === "?clearforyt") {
