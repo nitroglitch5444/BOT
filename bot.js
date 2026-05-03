@@ -1364,17 +1364,16 @@ function extractScriptName(url) {
 }
 
 function extractRawUrl(input) {
-    // Match with or without true parameter
-    const loadstringMatch = input.match(/game:HttpGet\("([^"]+)"(?:,\s*true)?\)/);
+    if (!input) return null;
+    // Handle various loadstring formats: game:HttpGet, game:HttpGetAsync, single/double quotes
+    const loadstringMatch = input.match(/game:HttpGet(?:Async)?\((?:'|")([^'"]+)(?:'|")(?:,\s*true)?\)/i);
     if (loadstringMatch) {
         return loadstringMatch[1];
     }
     
-    if (input.startsWith('http')) {
-        return input;
-    }
-    
-    return null;
+    // Fallback to finding any HTTP URL
+    const urlMatch = input.match(/https?:\/\/[^\s"'<>]+/);
+    return urlMatch ? urlMatch[0] : null;
 }
 
 function isValidGitHubUrl(url) {
@@ -3976,8 +3975,11 @@ if (cmd === "?repo") {
         if (query.includes('youtube.com/') || query.includes('youtu.be/')) {
             if (query.includes('watch?v=') || query.includes('youtu.be/')) {
                 // Manual single video bypass
-                const videoId = query.includes('watch?v=') ? query.split('v=')[1].split('&')[0] : query.split('/').pop().split('?')[0];
-                if (!videoId) return message.reply('❌ Invalid Video URL.');
+                // Robust Video ID extraction (supports watch?v=, youtu.be/, shorts/, live/)
+                const videoIdMatch = query.match(/(?:v=|\/|be\/|shorts\/|live\/)([\w-]{11})/);
+                const videoId = videoIdMatch ? videoIdMatch[1] : null;
+
+                if (!videoId) return message.reply('❌ Invalid YouTube URL (could not extract Video ID).');
 
                 if (message.ytProcessing) return;
                 message.ytProcessing = true;
@@ -4009,9 +4011,12 @@ if (cmd === "?repo") {
 
                 const log = `loadstring(game:HttpGet("${githubUrl}"))()\n${features || 'N/A'}\n${vd.gameId || 'N/A'}`;
                 return status.edit(`✅ **Manual Bypass Complete!**\n\n${log}`);
+            } else if (query.includes('/@') || query.includes('/channel/') || query.includes('/c/') || query.includes('/user/')) {
+                // Channel URL scan trigger - Make it automatic!
+                await message.reply(`🔄 **Channel URL detected.** Running a one-time scan (latest 5 videos)...`);
+                return await scanYouTubeChannel(query, message, 5, 'manual');
             } else {
-                // Channel URL scan trigger
-                return message.reply('💡 Use `?yt set <url>` to track a channel.');
+                return message.reply('❌ Could not extract Video ID or Channel info from URL.');
             }
         }
 
@@ -4049,13 +4054,17 @@ if (cmd === "?repo") {
 // ---- Helper: extract YouTube channel ID or handle from a URL ----
 function parseYouTubeChannelUrl(url) {
     if (!url) return null;
-    // Handle URLs
+    // Handle URLs: matches /channel/ID, /c/Name, /@Handle, /user/Name
     const m = url.match(/youtube\.com\/(?:channel\/|c\/|@|user\/)([^\/?&\s]+)/i);
-    if (m) return m[1].startsWith('@') ? m[1].substring(1) : m[1];
+    if (m) {
+        const identifier = m[1];
+        // If it's a handle, keep the @ if present, or return as is
+        // We want to keep the context for fetchYouTubeVideoIds
+        if (url.includes('/@')) return identifier.startsWith('@') ? identifier : `@${identifier}`;
+        return identifier;
+    }
     
-    // Handle @username or raw ID/handle
-    if (url.startsWith('@')) return url.substring(1);
-    
+    // Handle @username or raw ID/handle from input
     return url.trim();
 }
 
@@ -4068,29 +4077,39 @@ async function fetchYouTubeVideoIds(channelInput, max = 30) {
     }
 
     try {
-        let channelId = null;
         let uploadsPlaylistId = null;
 
-        // Resolve Channel to get Uploads Playlist ID
-        if (channelInput.startsWith('UC')) {
+        // 1. Try resolving by Channel ID (UC...)
+        if (channelInput.startsWith('UC') && channelInput.length === 24) {
             const chanRes = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
                 params: { part: 'contentDetails', id: channelInput, key: process.env.YOUTUBE_API_KEY }
             });
             uploadsPlaylistId = chanRes.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
         }
 
-        if (!uploadsPlaylistId) {
+        // 2. Try resolving by Handle (@...)
+        if (!uploadsPlaylistId && channelInput.startsWith('@')) {
             const chanRes = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
-                params: { part: 'contentDetails', forHandle: channelInput.startsWith('@') ? channelInput.substring(1) : channelInput, key: process.env.YOUTUBE_API_KEY }
+                params: { part: 'contentDetails', forHandle: channelInput, key: process.env.YOUTUBE_API_KEY }
             });
             uploadsPlaylistId = chanRes.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
         }
 
+        // 3. Try resolving by Username (legacy /user/ or fallback)
+        if (!uploadsPlaylistId) {
+            // Try as legacy username first
+            const chanRes = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+                params: { part: 'contentDetails', forUsername: channelInput.replace('@', ''), key: process.env.YOUTUBE_API_KEY }
+            });
+            uploadsPlaylistId = chanRes.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+        }
+
+        // 4. Ultimate fallback: Search for the channel
         if (!uploadsPlaylistId) {
             const searchRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
                 params: { part: 'snippet', q: channelInput, type: 'channel', maxResults: 1, key: process.env.YOUTUBE_API_KEY }
             });
-            channelId = searchRes.data.items?.[0]?.id?.channelId;
+            const channelId = searchRes.data.items?.[0]?.id?.channelId;
             if (channelId) {
                 const chanRes = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
                     params: { part: 'contentDetails', id: channelId, key: process.env.YOUTUBE_API_KEY }
@@ -4099,7 +4118,7 @@ async function fetchYouTubeVideoIds(channelInput, max = 30) {
             }
         }
 
-        if (!uploadsPlaylistId) throw new Error(`Could not locate channel uploads list.`);
+        if (!uploadsPlaylistId) throw new Error(`Could not locate channel uploads list for "${channelInput}".`);
 
         const playlistRes = await axios.get('https://www.googleapis.com/youtube/v3/playlistItems', {
             params: { part: 'snippet', playlistId: uploadsPlaylistId, maxResults: max, key: process.env.YOUTUBE_API_KEY }
@@ -4325,7 +4344,10 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
                 // Step 2: Bypass
                 await statusMsg.edit(`⚙️ **[${videoIdx}/${videos.length}]** - Step 2/3: Bypassing \`${vd.links[0].substring(0, 30)}...\``);
                 const bypass = await recursiveBypassWithIzen(vd.links[0], message);
-                if (bypass.error) throw new Error(`Bypass failed: ${bypass.message}`);
+                if (bypass.error) {
+                    results.push({ scriptName: video.title, failed: true, reason: `Bypass failed: ${bypass.message}` });
+                    continue;
+                }
 
                 const bypassedLink = bypass.result;
 
@@ -4337,7 +4359,10 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
 
                 const fileName = `${scriptName}.lua`;
                 const githubUrl = await createGitHubFile(fileName, finalCode, GITHUB_REPO);
-                if (!githubUrl) throw new Error('GitHub upload failed');
+                if (!githubUrl) {
+                    results.push({ scriptName: video.title, failed: true, reason: 'GitHub upload failed' });
+                    continue;
+                }
 
                 if (obfuscated) await createGitHubFile(fileName, baseScript, GITHUB_BACKUP_REPO).catch(() => {});
 
@@ -4363,7 +4388,8 @@ async function scanYouTubeChannel(channelUrl, message, limit = 30, source = 'aut
 
             } catch (innerErr) {
                 console.error(`Video ${video.id} failed:`, innerErr.message);
-                throw innerErr; // Fail the WHOLE batch as requested
+                results.push({ scriptName: video.title, failed: true, reason: innerErr.message });
+                continue;
             }
         }
 
